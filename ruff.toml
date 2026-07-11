@@ -1,0 +1,59 @@
+target-version = "py313"
+line-length = 120
+preview = true
+
+[lint]
+select = ["ALL"]
+ignore = [
+    # Type annotations — basedpyright strict mode handles this
+    "ANN",
+    # No docstrings, no copyright headers
+    "D",
+    "DOC",
+    "CPY",
+    # TODO/FIXME comment formatting
+    "TD",
+    "FIX",
+    # Exception message ergonomics — literal-indirection and custom-class churn without benefit
+    "EM101",
+    "EM102",
+    "TRY003",
+    # Class attribute names never conflict with builtins via self.x
+    "A003",
+    # Function-size counters — C901 already covers structural complexity
+    "PLR0911",
+    "PLR0912",
+    "PLR0913",
+    "PLR0914",
+    "PLR0915",
+    "PLR0917",
+    # Boolean parameters read fine as keyword-only flags here
+    "FBT001",
+    "FBT002",
+    "FBT003",
+    # Relative imports are the intra-package convention
+    "TID252",
+    # Formatter-owned; enforced by `ruff format`
+    "COM812",
+    "I001",
+    # Magic values in comparisons are readable in this CLI
+    "PLR2004",
+    # The formatter owns wrapping; long string literals and URLs stay on one line
+    "E501",
+    # Repeated append into a violations list reads more clearly than a comprehension
+    "PERF401",
+    # src-layout tests need no __init__.py
+    "INP001",
+    # Runtime-used typing imports stay at module level
+    "TC001",
+    "TC002",
+    "TC003",
+    # Small literal tuples read fine in membership tests
+    "PLR6201",
+]
+
+[lint.per-file-ignores]
+"tests/**" = ["S101", "PLR6301"]
+
+[lint.flake8-builtins]
+ignorelist = ["id", "map"]
