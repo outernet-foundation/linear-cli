@@ -67,6 +67,14 @@ class IssueListNode(_Model):
     project: ProjectRef | None = None
 
 
+class AttachmentNode(_Model):
+    id: str
+    title: str | None = None
+    subtitle: str | None = None
+    url: str
+    metadata: dict[str, object] | None = None
+
+
 class IssueDetailNode(_Model):
     identifier: str
     title: str
@@ -75,6 +83,7 @@ class IssueDetailNode(_Model):
     created_at: str = Field(alias="createdAt")
     state: IssueStateNode
     project: ProjectRef | None = None
+    attachments: _NodeList[AttachmentNode]
 
 
 class ProjectListNode(_Model):
@@ -271,6 +280,15 @@ def get_issue(
         "created_at": issue.created_at,
         "url": issue.url,
         "description": issue.description,
+        "attachments": [
+            {
+                "title": attachment.title,
+                "subtitle": attachment.subtitle,
+                "url": attachment.url,
+                "metadata": attachment.metadata,
+            }
+            for attachment in issue.attachments.nodes
+        ],
     })
 
 

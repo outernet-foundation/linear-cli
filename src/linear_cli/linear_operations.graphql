@@ -72,6 +72,15 @@ query Issue($id: String!) {
       id
       name
     }
+    attachments {
+      nodes {
+        id
+        title
+        subtitle
+        url
+        metadata
+      }
+    }
   }
 }
 
