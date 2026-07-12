@@ -389,7 +389,7 @@ def delete_label(
     _emit({"id": label_id, "deleted": True})
 
 
-@app.command(name="create-project")
+@app.command(name="create-project", help="Reads the project content (markdown body) from stdin.")
 def create_project(
     name: Annotated[str, typer.Option("--name", help="Project name")],
     team: Annotated[str, typer.Option("--team", help="Team key the project belongs to, e.g. PLE")],
@@ -407,7 +407,7 @@ def create_project(
     _emit({"id": project.id, "url": project.url})
 
 
-@app.command(name="update-project")
+@app.command(name="update-project", help="Reads the new project content (markdown body) from stdin if any is piped in.")
 def update_project(
     project_id: Annotated[str, typer.Option("--id", help="Project id to update")],
     name: Annotated[str | None, typer.Option("--name", help="New project name")] = None,
@@ -429,7 +429,10 @@ def update_project(
     _emit({"id": project.id, "url": project.url})
 
 
-@app.command(name="create-issue")
+@app.command(
+    name="create-issue",
+    help="Reads the issue description (markdown body) from stdin. Required — must match the Why/Done-when/Links template.",
+)
 def create_issue(
     title: Annotated[str, typer.Option("--title", help="Issue title")],
     team: Annotated[str, typer.Option("--team", help="Team key, e.g. PLE")],
@@ -451,7 +454,10 @@ def create_issue(
     _emit({"id": issue.id, "identifier": issue.identifier, "url": issue.url})
 
 
-@app.command(name="update-issue")
+@app.command(
+    name="update-issue",
+    help="Reads the new issue description (markdown body) from stdin if any is piped in. Piped bodies must match the Why/Done-when/Links template.",
+)
 def update_issue(
     issue_id: Annotated[str, typer.Option("--id", help="Issue id to update")],
     title: Annotated[str | None, typer.Option("--title", help="New issue title")] = None,
@@ -503,7 +509,7 @@ def link(
     _emit({"blocker": blocker, "blocked": blocked, "type": "blocks"})
 
 
-@app.command()
+@app.command(help="Reads the comment body (markdown) from stdin. Required.")
 def comment(
     issue_id: Annotated[str, typer.Option("--issue", help="Issue id to comment on")],
 ) -> None:
