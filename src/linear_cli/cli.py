@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sys
 from collections.abc import Callable, Iterator
+from datetime import UTC, datetime
 from functools import cache
 from pathlib import Path
 from typing import Annotated
@@ -18,6 +19,7 @@ from .profiles import (
     require_team,
     resolve_profile_name,
 )
+from .snapshot import identifier_sort_key, label_snapshot_filter
 from .validation import orphan_design_docs, validate_body, validate_title
 
 LINEAR_ENDPOINT = "https://api.linear.app/graphql"
@@ -117,6 +119,26 @@ class IssueRelationsNode(_Model):
     relations: _NodeList[IssueRelationNode]
 
 
+class CommentUserNode(_Model):
+    name: str
+
+
+class IssueSnapshotCommentNode(_Model):
+    body: str | None = None
+    created_at: str = Field(alias="createdAt")
+    user: CommentUserNode | None = None
+
+
+class IssueSnapshotNode(_Model):
+    id: str
+    identifier: str
+    title: str
+    description: str | None = None
+    state: IssueStateNode
+    labels: _NodeList[IssueLabelName]
+    comments: _NodeList[IssueSnapshotCommentNode]
+
+
 class WorkflowStateNode(_Model):
     id: str
     name: str
@@ -210,6 +232,14 @@ class ProjectsData(_Model):
 
 class IssueRelationsData(_Model):
     issues: _Connection[IssueRelationsNode]
+
+
+class IssueSnapshotData(_Model):
+    issues: _Connection[IssueSnapshotNode]
+
+
+class IssueSnapshotByIdData(_Model):
+    issue: IssueSnapshotNode
 
 
 class WorkflowStatesData(_Model):
@@ -340,6 +370,29 @@ def list_relations(
 def list_projects() -> None:
     for project in _paginate("Projects", {}, ProjectsData, lambda data: data.projects):
         _emit({"id": project.id, "name": project.name, "state": project.state, "url": project.url})
+
+
+@app.command(name="snapshot")
+def snapshot(
+    issue: Annotated[
+        list[str] | None,
+        typer.Option("--issue", help="Issue identifier to include (repeatable), e.g. PLE-352"),
+    ] = None,
+    label: Annotated[
+        str | None, typer.Option("--label", help="Label name; snapshot every issue carrying this label")
+    ] = None,
+) -> None:
+    if issue is None and label is None:
+        typer.echo("Pass --issue (repeatable) or --label to select issues to snapshot.", err=True)
+        raise typer.Exit(1)
+    if issue is not None and label is not None:
+        typer.echo("Pass --issue or --label, not both.", err=True)
+        raise typer.Exit(1)
+
+    nodes = _snapshot_nodes(issue, label)
+    nodes.sort(key=lambda node: identifier_sort_key(node.identifier))
+    record = _snapshot_record(_resolved_profile_name(), nodes, datetime.now(UTC).isoformat())
+    typer.echo(json.dumps(record, indent=2))
 
 
 @app.command(name="lint")
@@ -608,6 +661,46 @@ def _paginate[T: _Model, NodeT](
         after = connection.page_info.end_cursor
 
 
+def _snapshot_nodes(issues: list[str] | None, label: str | None) -> list[IssueSnapshotNode]:
+    if issues is not None:
+        return [graphql("IssueSnapshotById", {"id": identifier}, IssueSnapshotByIdData).issue for identifier in issues]
+    if label is not None:
+        return list(
+            _paginate(
+                "IssueSnapshot", {"filter": label_snapshot_filter(label)}, IssueSnapshotData, lambda data: data.issues
+            )
+        )
+    return []
+
+
+def _snapshot_record(profile_name: str, nodes: list[IssueSnapshotNode], captured_at: str) -> dict[str, object]:
+    return {
+        "captured_at": captured_at,
+        "linear_profile": profile_name,
+        "issues": [_snapshot_issue_dict(node) for node in nodes],
+    }
+
+
+def _snapshot_issue_dict(node: IssueSnapshotNode) -> dict[str, object]:
+    return {
+        "id": node.id,
+        "identifier": node.identifier,
+        "title": node.title,
+        "description": node.description,
+        "state": node.state.name,
+        "labels": [label.name for label in node.labels.nodes],
+        "comments": [_snapshot_comment_dict(comment) for comment in node.comments.nodes],
+    }
+
+
+def _snapshot_comment_dict(comment: IssueSnapshotCommentNode) -> dict[str, object]:
+    return {
+        "body": comment.body,
+        "user": comment.user.name if comment.user else None,
+        "created_at": comment.created_at,
+    }
+
+
 def graphql[T: _Model](operation: str, variables: dict[str, object], model: type[T]) -> T:
     response = httpx.post(
         LINEAR_ENDPOINT,
@@ -734,6 +827,16 @@ def _resolved_team(override: str | None) -> str | None:
 
 @cache
 def _resolved_profile() -> Profile:
+    return _resolved_profile_and_name()[1]
+
+
+@cache
+def _resolved_profile_name() -> str:
+    return _resolved_profile_and_name()[0]
+
+
+@cache
+def _resolved_profile_and_name() -> tuple[str, Profile]:
     config = load_config()
     if config is None:
         typer.echo(
@@ -743,7 +846,7 @@ def _resolved_profile() -> Profile:
         raise typer.Exit(1)
 
     name = resolve_profile_name(config, _CliState.profile_override, Path.cwd())
-    return config.profiles[name]
+    return name, config.profiles[name]
 
 
 def _emit(record: dict[str, object]) -> None:

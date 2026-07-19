@@ -57,6 +57,66 @@ query IssueRelations($filter: IssueFilter, $after: String) {
   }
 }
 
+query IssueSnapshot($filter: IssueFilter, $after: String) {
+  issues(first: 250, filter: $filter, after: $after) {
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+    nodes {
+      id
+      identifier
+      title
+      description
+      state {
+        name
+        type
+      }
+      labels {
+        nodes {
+          name
+        }
+      }
+      comments {
+        nodes {
+          body
+          createdAt
+          user {
+            name
+          }
+        }
+      }
+    }
+  }
+}
+
+query IssueSnapshotById($id: String!) {
+  issue(id: $id) {
+    id
+    identifier
+    title
+    description
+    state {
+      name
+      type
+    }
+    labels {
+      nodes {
+        name
+      }
+    }
+    comments {
+      nodes {
+        body
+        createdAt
+        user {
+          name
+        }
+      }
+    }
+  }
+}
+
 query Issue($id: String!) {
   issue(id: $id) {
     identifier
