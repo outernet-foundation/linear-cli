@@ -4,7 +4,6 @@ import json
 import sys
 from collections.abc import Callable, Iterator
 from functools import cache
-from os import environ
 from pathlib import Path
 from typing import Annotated
 
@@ -12,6 +11,13 @@ import httpx
 import typer
 from pydantic import BaseModel, ConfigDict, Field
 
+from .profiles import (
+    CONFIG_PATH,
+    Profile,
+    load_config,
+    require_team,
+    resolve_profile_name,
+)
 from .validation import orphan_design_docs, validate_body, validate_title
 
 LINEAR_ENDPOINT = "https://api.linear.app/graphql"
@@ -20,6 +26,10 @@ OPERATIONS_DOCUMENT = "linear_operations.graphql"
 
 class _Model(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
+
+
+class _CliState:
+    profile_override: str | None = None
 
 
 class PageInfo(_Model):
@@ -249,11 +259,23 @@ class CommentDeleteData(_Model):
 app = typer.Typer(add_completion=False, pretty_exceptions_show_locals=False)
 
 
+@app.callback()
+def root_callback(
+    profile: Annotated[
+        str | None,
+        typer.Option("--profile", help="Profile name from ~/.config/linear-cli/config.json"),
+    ] = None,
+) -> None:
+    _CliState.profile_override = profile
+
+
 @app.command(name="list-issues")
 def list_issues(
     team: Annotated[str | None, typer.Option("--team", help="Team key to filter by, e.g. PLE")] = None,
 ) -> None:
-    for issue in _paginate("Issues", {"filter": _team_filter(team)}, IssuesData, lambda data: data.issues):
+    for issue in _paginate(
+        "Issues", {"filter": _team_filter(_resolved_team(team))}, IssuesData, lambda data: data.issues
+    ):
         _emit({
             "id": issue.id,
             "identifier": issue.identifier,
@@ -297,7 +319,7 @@ def list_relations(
     team: Annotated[str | None, typer.Option("--team", help="Team key to filter by, e.g. PLE")] = None,
 ) -> None:
     for issue in _paginate(
-        "IssueRelations", {"filter": _team_filter(team)}, IssueRelationsData, lambda data: data.issues
+        "IssueRelations", {"filter": _team_filter(_resolved_team(team))}, IssueRelationsData, lambda data: data.issues
     ):
         for relation in issue.relations.nodes:
             if relation.related_issue is None:
@@ -321,7 +343,9 @@ def lint(
 ) -> None:
     offenders = 0
     open_bodies: list[str] = []
-    for issue in _paginate("Issues", {"filter": _team_filter(team)}, IssuesData, lambda data: data.issues):
+    for issue in _paginate(
+        "Issues", {"filter": _team_filter(_resolved_team(team))}, IssuesData, lambda data: data.issues
+    ):
         if issue.state.type in ("completed", "canceled"):
             continue
 
@@ -410,11 +434,12 @@ def delete_label(
 @app.command(name="create-project", help="Reads the project content (markdown body) from stdin.")
 def create_project(
     name: Annotated[str, typer.Option("--name", help="Project name")],
-    team: Annotated[str, typer.Option("--team", help="Team key the project belongs to, e.g. PLE")],
+    team: Annotated[str | None, typer.Option("--team", help="Team key the project belongs to, e.g. PLE")] = None,
     summary: Annotated[str, typer.Option("--summary", help="One-line project description")] = "",
 ) -> None:
     content = _read_stdin()
-    fields: dict[str, object] = {"name": name, "teamIds": [_resolve_team_id(team)]}
+    resolved_team = require_team(_resolved_profile(), team)
+    fields: dict[str, object] = {"name": name, "teamIds": [_resolve_team_id(resolved_team)]}
     if summary:
         fields["description"] = summary
     if content.strip():
@@ -453,13 +478,14 @@ def update_project(
 )
 def create_issue(
     title: Annotated[str, typer.Option("--title", help="Issue title")],
-    team: Annotated[str, typer.Option("--team", help="Team key, e.g. PLE")],
+    team: Annotated[str | None, typer.Option("--team", help="Team key, e.g. PLE")] = None,
     project: Annotated[str | None, typer.Option("--project", help="Project id to file the issue under")] = None,
     label: Annotated[list[str] | None, typer.Option("--label", help="Label id to attach (repeatable)")] = None,
 ) -> None:
     description = _read_stdin()
     _enforce_conventions(title, description)
-    fields: dict[str, object] = {"teamId": _resolve_team_id(team), "title": title}
+    resolved_team = require_team(_resolved_profile(), team)
+    fields: dict[str, object] = {"teamId": _resolve_team_id(resolved_team), "title": title}
     if description.strip():
         fields["description"] = description
     if project is not None:
@@ -496,15 +522,14 @@ def update_issue(
     if label:
         fields["labelIds"] = label
     if state is not None:
-        if team is None:
-            typer.echo("--state requires --team to resolve the workflow state", err=True)
-            raise typer.Exit(1)
-
-        states = graphql("WorkflowStates", {"filter": _team_filter(team)}, WorkflowStatesData).workflow_states.nodes
+        resolved_state_team = require_team(_resolved_profile(), team)
+        states = graphql(
+            "WorkflowStates", {"filter": _team_filter(resolved_state_team)}, WorkflowStatesData
+        ).workflow_states.nodes
         matches = [candidate for candidate in states if candidate.name.casefold() == state.casefold()]
         if len(matches) != 1:
             available = ", ".join(sorted(candidate.name for candidate in states))
-            typer.echo(f"No unique state {state!r} in team {team!r}; available: {available}", err=True)
+            typer.echo(f"No unique state {state!r} in team {resolved_state_team!r}; available: {available}", err=True)
             raise typer.Exit(1)
 
         fields["stateId"] = matches[0].id
@@ -606,7 +631,7 @@ def _enforce_conventions(title: str | None, body: str | None) -> None:
     for violation in violations:
         typer.echo(f"convention violation: {violation}", err=True)
 
-    typer.echo("Refusing to write: fix the title/body to match linear_tool/AGENTS.md conventions.", err=True)
+    typer.echo("Refusing to write: fix the title/body to match the AGENTS.md conventions.", err=True)
     raise typer.Exit(1)
 
 
@@ -680,26 +705,28 @@ def _find_up(marker: str) -> Path:
 
 
 def _api_key() -> str:
-    key = environ.get("LINEAR_API_KEY")
-    if not key:
-        key = _parse_env_file(_find_up(".env")).get("LINEAR_API_KEY")
-    if not key:
-        raise RuntimeError("LINEAR_API_KEY not found in environment or .env")
-
-    return key
+    return _resolved_profile().api_key
 
 
-def _parse_env_file(path: Path) -> dict[str, str]:
-    result: dict[str, str] = {}
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
+def _resolved_team(override: str | None) -> str | None:
+    if override is not None:
+        return override
 
-        key, _, value = line.partition("=")
-        result[key.strip()] = value.strip().strip("'\"")
+    return _resolved_profile().team_key
 
-    return result
+
+@cache
+def _resolved_profile() -> Profile:
+    config = load_config()
+    if config is None:
+        typer.echo(
+            f"No profile config found at {CONFIG_PATH}; create one with profiles and path_defaults.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    name = resolve_profile_name(config, _CliState.profile_override, Path.cwd())
+    return config.profiles[name]
 
 
 def _emit(record: dict[str, object]) -> None:
