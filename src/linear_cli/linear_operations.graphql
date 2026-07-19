@@ -3,6 +3,7 @@ query Teams {
     nodes {
       id
       key
+      name
     }
   }
 }
@@ -162,6 +163,28 @@ query Projects($after: String) {
 query WorkflowStates($filter: WorkflowStateFilter) {
   workflowStates(filter: $filter) {
     nodes {
+      id
+      name
+      type
+    }
+  }
+}
+
+mutation CreateTeam($input: TeamCreateInput!) {
+  teamCreate(input: $input) {
+    success
+    team {
+      id
+      key
+      name
+    }
+  }
+}
+
+mutation CreateWorkflowState($input: WorkflowStateCreateInput!) {
+  workflowStateCreate(input: $input) {
+    success
+    workflowState {
       id
       name
       type

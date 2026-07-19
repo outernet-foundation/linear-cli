@@ -51,6 +51,7 @@ class _NodeList[NodeT](_Model):
 class TeamNode(_Model):
     id: str
     key: str
+    name: str
 
 
 class IssueStateNode(_Model):
@@ -167,6 +168,18 @@ class CreatedProject(_Model):
     url: str
 
 
+class CreatedTeam(_Model):
+    id: str
+    key: str
+    name: str
+
+
+class CreatedWorkflowState(_Model):
+    id: str
+    name: str
+    type: str
+
+
 class CreatedIssue(_Model):
     id: str
     identifier: str
@@ -190,6 +203,16 @@ class IssueLabelDeletePayload(_Model):
 class ProjectMutationPayload(_Model):
     success: bool
     project: CreatedProject | None = None
+
+
+class TeamMutationPayload(_Model):
+    success: bool
+    team: CreatedTeam | None = None
+
+
+class WorkflowStateMutationPayload(_Model):
+    success: bool
+    workflow_state: CreatedWorkflowState | None = Field(default=None, alias="workflowState")
 
 
 class ProjectDeletePayload(_Model):
@@ -264,6 +287,14 @@ class IssueLabelDeleteData(_Model):
 
 class ProjectCreateData(_Model):
     project_create: ProjectMutationPayload = Field(alias="projectCreate")
+
+
+class TeamCreateData(_Model):
+    team_create: TeamMutationPayload = Field(alias="teamCreate")
+
+
+class WorkflowStateCreateData(_Model):
+    workflow_state_create: WorkflowStateMutationPayload = Field(alias="workflowStateCreate")
 
 
 class ProjectUpdateData(_Model):
@@ -370,6 +401,69 @@ def list_relations(
 def list_projects() -> None:
     for project in _paginate("Projects", {}, ProjectsData, lambda data: data.projects):
         _emit({"id": project.id, "name": project.name, "state": project.state, "url": project.url})
+
+
+@app.command(name="list-teams")
+def list_teams() -> None:
+    teams = graphql("Teams", {}, TeamsData).teams.nodes
+    for team in sorted(teams, key=lambda team: team.key):
+        _emit({"id": team.id, "key": team.key, "name": team.name})
+
+
+@app.command(name="list-workflow-states")
+def list_workflow_states(
+    team: Annotated[str | None, typer.Option("--team", help="Team key, e.g. PLE")] = None,
+) -> None:
+    resolved_team = require_team(_resolved_profile(), team)
+    states = graphql(
+        "WorkflowStates", {"filter": _team_filter(resolved_team)}, WorkflowStatesData
+    ).workflow_states.nodes
+    for state in states:
+        _emit({"id": state.id, "name": state.name, "type": state.type})
+
+
+@app.command(name="create-team")
+def create_team(
+    name: Annotated[str, typer.Option("--name", help="Team display name")],
+    key: Annotated[str, typer.Option("--key", help="Team key, e.g. GOV")],
+    description: Annotated[str | None, typer.Option("--description", help="Optional team description")] = None,
+) -> None:
+    fields: dict[str, object] = {"name": name, "key": key}
+    if description is not None:
+        fields["description"] = description
+
+    payload = graphql("CreateTeam", {"input": fields}, TeamCreateData).team_create
+    team = _require(payload.success, payload.team, f"Failed to create team {name!r}")
+    _emit({"id": team.id, "key": team.key, "name": team.name})
+
+
+@app.command(name="create-workflow-state")
+def create_workflow_state(
+    team: Annotated[str, typer.Option("--team", help="Team key, e.g. GOV")],
+    name: Annotated[str, typer.Option("--name", help="State display name")],
+    state_type: Annotated[
+        str,
+        typer.Option("--type", help="Linear state type: backlog, unstarted, started, completed, canceled"),
+    ],
+    color: Annotated[str, typer.Option("--color", help="Hex color, e.g. #eb5757")],
+    description: Annotated[str | None, typer.Option("--description", help="Optional state description")] = None,
+    position: Annotated[float | None, typer.Option("--position", help="Position (ordering)")] = None,
+) -> None:
+    resolved_team = require_team(_resolved_profile(), team)
+    fields: dict[str, object] = {
+        "teamId": _resolve_team_id(resolved_team),
+        "name": name,
+        "type": state_type,
+        "color": color,
+    }
+    if description is not None:
+        fields["description"] = description
+    if position is not None:
+        fields["position"] = position
+
+    payload = graphql("CreateWorkflowState", {"input": fields}, WorkflowStateCreateData).workflow_state_create
+    state = _require(payload.success, payload.workflow_state, f"Failed to create workflow state {name!r}")
+    _emit({"id": state.id, "name": state.name, "type": state.type})
 
 
 @app.command(name="snapshot")
@@ -578,7 +672,10 @@ def update_issue(
     project: Annotated[str | None, typer.Option("--project", help="Project id to move the issue under")] = None,
     label: Annotated[list[str] | None, typer.Option("--label", help="Replaces the label set (repeatable)")] = None,
     state: Annotated[str | None, typer.Option("--state", help="Workflow state name to move the issue to")] = None,
-    team: Annotated[str | None, typer.Option("--team", help="Team key that owns the state, e.g. PLE")] = None,
+    team: Annotated[
+        str | None,
+        typer.Option("--team", help="Team key to move the issue to (also used for state resolution), e.g. GOV"),
+    ] = None,
 ) -> None:
     description = _read_stdin()
     _enforce_conventions(title, description if description.strip() else None)
@@ -591,6 +688,9 @@ def update_issue(
         fields["projectId"] = project
     if label:
         fields["labelIds"] = label
+    if team is not None:
+        resolved_team_key = require_team(_resolved_profile(), team)
+        fields["teamId"] = _resolve_team_id(resolved_team_key)
     if state is not None:
         resolved_state_team = require_team(_resolved_profile(), team)
         states = graphql(
@@ -604,7 +704,7 @@ def update_issue(
 
         fields["stateId"] = matches[0].id
 
-    _require_fields(fields, "Nothing to update; pass --title, --label, --state, or a body on stdin")
+    _require_fields(fields, "Nothing to update; pass --team, --title, --label, --state, or a body on stdin")
 
     payload = graphql("UpdateIssue", {"id": issue_id, "input": fields}, IssueUpdateData).issue_update
     issue = _require(payload.success, payload.issue, f"Failed to update issue {issue_id!r}")
