@@ -13,19 +13,8 @@ Workspace facts and per-repo routing live in `~/.config/linear-cli/config.json`:
 ```json
 {
   "profiles": {
-    "foundation": {
-      "api_key": "lin_api_...",
-      "team_key": "PLE",
-      "labels": {
-        "repo": ["placeframe", "make-it-sing", "infra"],
-        "type": ["bug", "feature", "improvement", "chore", "refactor", "docs"]
-      }
-    },
-    "personal": {
-      "api_key": "lin_api_...",
-      "team_key": null,
-      "labels": {}
-    }
+    "foundation": { "api_key": "lin_api_...", "team_key": "PLE" },
+    "personal":   { "api_key": "lin_api_...", "team_key": null }
   },
   "path_defaults": {
     "/workspace/placeframe": "foundation",
@@ -40,9 +29,11 @@ Location: `~/.config/linear-cli/` (the `-cli` suffix disambiguates from any futu
 
 An earlier design proposed a `.linear-profile` marker file committed to each repo root (analogous to `.python-version` or `.nvmrc`). That couples the repo to a specific workspace — wrong layer. The same repo cloned by a different operator (or forked) would inherit a workspace routing decision that doesn't match their setup. Putting `path_defaults` in user-side config keeps the repo workspace-agnostic: each operator's machine decides which profile a checkout uses, and changing the routing is a local edit, not a commit.
 
-### Why deterministic workspace facts live in config, not prose
+### Why team keys live in config, not introspected
 
-Team keys and label taxonomies are deterministic data, not conventions. An earlier draft kept them in this repo's `AGENTS.md` as prose ("one Engineering team keyed PLE"). That conflated two layers: universal conventions the tool enforces (ticket body template, declarative-outcome rules — these apply to *any* workspace) and workspace-specific facts that the tool and agents need to know but that differ per workspace. The split: universal rules stay in `AGENTS.md`; workspace facts migrate to `config.json` where they can differ per profile and where the tool can read them at runtime.
+A team key is a user-routing fact, not workspace state. Linear exposes the list of teams in a workspace, but cannot tell you which one *this operator* means when writing tickets from *this repo* — that's a per-operator routing decision (foundation has one team today; a workspace with multiple teams would need to pick one per profile). Putting `team_key` in user config makes the choice explicit, profile-scoped, and overridable per-call via `--team`.
+
+Label taxonomy, by contrast, is workspace state — Linear owns it, exposes it via `list-labels`, and any local mirror goes stale the moment a label is added or renamed in the web UI. The config schema does not carry labels; agents and humans call `list-labels` for the authoritative current tree.
 
 ## Profile resolution
 
