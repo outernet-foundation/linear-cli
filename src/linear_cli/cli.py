@@ -627,6 +627,10 @@ def update_project(
     project_id: Annotated[str, typer.Option("--id", help="Project id to update")],
     name: Annotated[str | None, typer.Option("--name", help="New project name")] = None,
     summary: Annotated[str | None, typer.Option("--summary", help="New one-line description")] = None,
+    team: Annotated[
+        str | None,
+        typer.Option("--team", help="Team key to re-home the project to, e.g. GOV"),
+    ] = None,
 ) -> None:
     content = _read_stdin()
     fields: dict[str, object] = {}
@@ -636,8 +640,11 @@ def update_project(
         fields["description"] = summary
     if content.strip():
         fields["content"] = content
+    if team is not None:
+        resolved_team = require_team(_resolved_profile(), team)
+        fields["teamIds"] = [_resolve_team_id(resolved_team)]
 
-    _require_fields(fields, "Nothing to update; pass --name, --summary, or a body on stdin")
+    _require_fields(fields, "Nothing to update; pass --team, --name, --summary, or a body on stdin")
 
     payload = graphql("UpdateProject", {"id": project_id, "input": fields}, ProjectUpdateData).project_update
     project = _require(payload.success, payload.project, f"Failed to update project {project_id!r}")
