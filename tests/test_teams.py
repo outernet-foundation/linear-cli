@@ -8,6 +8,7 @@ from linear_cli.cli import (
     CreatedWorkflowState,
     TeamCreateData,
     TeamNode,
+    WorkflowStateArchiveData,
     WorkflowStateCreateData,
 )
 
@@ -64,12 +65,21 @@ def test_workflow_state_create_data_parses_payload() -> None:
     assert data.workflow_state_create.workflow_state.name == "On Agenda"
 
 
+def test_workflow_state_archive_data_parses_success() -> None:
+    data = WorkflowStateArchiveData.model_validate({"workflowStateArchive": {"success": True}})
+    assert data.workflow_state_archive.success is True
+
+
 def test_operations_document_defines_create_team_mutation() -> None:
     assert "mutation CreateTeam($input: TeamCreateInput!)" in _operations_text()
 
 
 def test_operations_document_defines_create_workflow_state_mutation() -> None:
     assert "mutation CreateWorkflowState($input: WorkflowStateCreateInput!)" in _operations_text()
+
+
+def test_operations_document_defines_archive_workflow_state_mutation() -> None:
+    assert "mutation ArchiveWorkflowState($id: String!)" in _operations_text()
 
 
 def test_operations_document_teams_query_selects_name() -> None:

@@ -192,6 +192,12 @@ mutation CreateWorkflowState($input: WorkflowStateCreateInput!) {
   }
 }
 
+mutation ArchiveWorkflowState($id: String!) {
+  workflowStateArchive(id: $id) {
+    success
+  }
+}
+
 query Labels {
   issueLabels(first: 250) {
     nodes {

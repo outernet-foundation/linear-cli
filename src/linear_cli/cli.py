@@ -297,6 +297,14 @@ class WorkflowStateCreateData(_Model):
     workflow_state_create: WorkflowStateMutationPayload = Field(alias="workflowStateCreate")
 
 
+class WorkflowStateArchivePayload(_Model):
+    success: bool
+
+
+class WorkflowStateArchiveData(_Model):
+    workflow_state_archive: WorkflowStateArchivePayload = Field(alias="workflowStateArchive")
+
+
 class ProjectUpdateData(_Model):
     project_update: ProjectMutationPayload = Field(alias="projectUpdate")
 
@@ -464,6 +472,15 @@ def create_workflow_state(
     payload = graphql("CreateWorkflowState", {"input": fields}, WorkflowStateCreateData).workflow_state_create
     state = _require(payload.success, payload.workflow_state, f"Failed to create workflow state {name!r}")
     _emit({"id": state.id, "name": state.name, "type": state.type})
+
+
+@app.command(name="archive-workflow-state")
+def archive_workflow_state(
+    state_id: Annotated[str, typer.Option("--id", help="Workflow state id to archive")],
+) -> None:
+    payload = graphql("ArchiveWorkflowState", {"id": state_id}, WorkflowStateArchiveData).workflow_state_archive
+    _require_ok(payload.success, f"Failed to archive workflow state {state_id!r}")
+    _emit({"id": state_id, "archived": True})
 
 
 @app.command(name="snapshot")
