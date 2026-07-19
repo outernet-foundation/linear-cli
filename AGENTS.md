@@ -23,7 +23,7 @@ Workspace facts and per-repo routing live in `~/.config/linear-cli/config.json`,
 {
   "profiles": {
     "foundation": { "api_key": "...", "team_key": "PLE" },
-    "personal":   { "api_key": "...", "team_key": null }
+    "personal":   { "api_key": "...", "team_key": "TYL" }
   },
   "path_defaults": {
     "/workspace/placeframe": "foundation",
@@ -32,7 +32,7 @@ Workspace facts and per-repo routing live in `~/.config/linear-cli/config.json`,
 }
 ```
 
-Profile resolution order: `--profile <name>` flag (if given) → longest-prefix match on `path_defaults` against the resolved CWD → hard error. No silent default. A profile's `team_key` provides the default for every team-scoped verb; pass `--team` to override. `team_key: null` means the workspace carries no team default — reads paginate workspace-wide, and writes requiring a team error if `--team` isn't passed. Label taxonomy is not mirrored in config — `list-labels` is authoritative and always current.
+Profile resolution order: `--profile <name>` flag (if given) → longest-prefix match on `path_defaults` against the resolved CWD → hard error. No silent default. A profile's `team_key` provides the default for every team-scoped verb; pass `--team` to override. `team_key` is required on every profile because every Linear workspace has at least one team — Linear creates one on workspace setup, and every issue must belong to a team. Label taxonomy is not mirrored in config — `list-labels` is authoritative and always current.
 
 ### Projects
 
