@@ -15,7 +15,6 @@ class _Model(BaseModel):
 class Profile(_Model):
     api_key: str
     team_key: str | None = None
-    labels: dict[str, list[str]] = Field(default_factory=dict)
 
 
 class ProfileConfig(_Model):

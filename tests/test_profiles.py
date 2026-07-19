@@ -18,7 +18,7 @@ from linear_cli.profiles import (
 def _config() -> ProfileConfig:
     return ProfileConfig(
         profiles={
-            "foundation": Profile(api_key="key-foundation", team_key="PLE", labels={"repo": ["placeframe"]}),
+            "foundation": Profile(api_key="key-foundation", team_key="PLE"),
             "personal": Profile(api_key="key-personal", team_key=None),
         },
         path_defaults={
@@ -102,7 +102,6 @@ def test_write_then_load_round_trips(tmp_path: Path) -> None:
 def test_profile_with_no_team_key_defaults_to_none() -> None:
     profile = Profile(api_key="key")
     assert profile.team_key is None
-    assert profile.labels == {}
 
 
 def test_config_with_empty_path_defaults_forces_explicit_profile() -> None:
