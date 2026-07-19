@@ -1,6 +1,6 @@
 # Bookmark — multi-workspace linear-cli + cross-repo install
 
-Session-continuity artifact. Read end-to-end before starting work. Captured 2026-07-18 after a design discussion that scoped the project end-to-end. This file plus the linked repo state is the entire context — a fresh sandbox + fresh session reading this should be ready to start implementing, modulo the open questions at the bottom.
+Session-continuity artifact. Read end-to-end before starting work. Captured 2026-07-19 after a design discussion that scoped the project end-to-end and resolved the open questions blocking implementation. This file plus the linked repo state is the entire context — a fresh sandbox + fresh session reading this should be ready to start implementing.
 
 ## TL;DR
 
@@ -8,9 +8,9 @@ linear-cli is the team's audited Linear write path. Today it (a) authenticates v
 
 Three workstreams, sequenced:
 
-1. **linear-cli (here)**: extend the tool to read named profiles from `~/.config/linear/config.toml`, add a `--profile` global flag with per-cwd defaulting, and switch the install story from per-repo git-reference to global `uv tool install`. Design lives in this repo's `design/`; ticket files against the foundation workspace.
+1. **linear-cli (here)**: extend the tool to read named profiles from `~/.config/linear-cli/config.json` (with per-repo path-defaults), add a `--profile` global flag, and switch the install story from per-repo git-reference to global `uv tool install`. Design lives in this repo's `design/`; ticket files against the foundation workspace.
 2. **pulsar**: add host→sandbox credential plumbing that mirrors the existing GitHub App pattern (`scripts/src/scripts/sandbox/configure_github_app.py` is the template). Independent of workstream 1 — pulsar can adopt either the old single-key flow or the new profile flow depending on sequencing.
-3. **operator setup**: create the personal Linear workspace, mint a personal API key, populate `~/.config/linear/config.toml` on the host with both profiles. Prerequisite for end-to-end use, not for code changes.
+3. **operator setup**: mint a personal-workspace API key (workspace already exists), populate `~/.config/linear-cli/config.json` on the host with both profiles. Prerequisite for end-to-end use, not for code changes.
 
 ## Why this project, in one paragraph
 
@@ -24,7 +24,7 @@ linear-cli was placeframe-shaped — one workspace, one team (`PLE`), one repo c
 - Verbs: `list-issues`, `get-issue`, `list-relations`, `list-projects`, `list-labels`, `lint`, `ensure-label`, `update-label`, `delete-label`, `create-project`, `create-issue`, `update-project`, `update-issue`, `link`, `comment`, `delete-comment`. The `--team` flag (e.g. `--team PLE`) selects a team within the authed workspace.
 - Auth: `_api_key()` at `src/linear_cli/cli.py:682` reads `LINEAR_API_KEY` from env, falls back to `_parse_env_file(_find_up(".env"))` (walks from CWD upward). The Authorization header is built at `cli.py:572`.
 - Workspaces are API-key-scoped. There is no concept of multiple keys or multiple workspaces in the tool today.
-- The team conventions (one `Engineering` team, key `PLE`, the `repo`/`type` label groups, the declarative-ticket body template) all live in this repo's `AGENTS.md`. They are foundation-workspace-specific; a personal workspace will need its own conventions or a deliberate decision to mirror.
+- The team conventions currently live in this repo's `AGENTS.md`: the body template (universal, tool-enforced via `validation.py`) and the foundation-workspace facts (one `Engineering` team keyed `PLE`, the `repo`/`type` label groups). Phase 1 splits these — the universal rules stay in `AGENTS.md`, the workspace facts migrate into `~/.config/linear-cli/config.json` as deterministic data.
 
 ## How linear-cli is consumed today
 
@@ -45,7 +45,7 @@ Pulsar's existing GitHub App flow is the canonical pattern for "host-side secret
 - **In-container minting**: `scripts/src/scripts/mint_github_app_token.py:16` reads the mounted key at `/home/code/.config/github-app/private-key.pem` plus the env-var ids, mints a one-hour installation token, caches it at `~/.cache/pulsar/github-app-token.json`.
 - **Call sites wrap the mint**: `GH_TOKEN=$(uv run mint-github-app-token) gh ...`. Documented in pulsar's `AGENTS.md` item 4.
 
-The pattern: **non-secret ids ride env vars via `forward_env`; the secret itself is a file bind-mounted into a known container path; an in-container mint/resolve step combines them at the point of use.** Linear is simpler than GitHub App because the secret IS the API key (no minting needed), so the pattern collapses to "bind-mount the key file(s), point linear-cli at them."
+The pattern: **non-secret ids ride env vars via `forward_env`; the secret itself is a file bind-mounted into a known container path; an in-container mint/resolve step combines them at the point of use.** Linear is simpler than GitHub App because the secret IS the API key (no minting needed), so the pattern collapses to "bind-mount the config dir, point linear-cli at it."
 
 ## The plan, sequenced
 
@@ -53,12 +53,25 @@ The pattern: **non-secret ids ride env vars via `forward_env`; the secret itself
 
 Files touched in `src/linear_cli/`:
 
-- **`cli.py`**: extend `_api_key()` (line 682) to `_resolve_api_key(profile: str | None)`. Resolution order: `--profile` flag value (if given) → marker-file default via `_find_up(".linear-profile")` (falls back to a `linear.default-profile` key in `~/.config/linear/config.toml`) → error if neither. Add a typer `--profile` global option on the root app (before subcommands). The HTTP Authorization header at line 572 uses the resolved key.
-- **New module** `profiles.py`: pydantic model for `~/.config/linear/config.toml` (or `.json` — bikeshed). Shape: `{ profiles: { <name>: { api_key: str, workspace_url: str? }, default_profile: str? } }`. Read function, write function (for an eventual `linear profile add` verb, out of scope here).
+- **`cli.py`**: extend `_api_key()` (line 682) to `_resolve_api_key(profile: str | None)`. Resolution order: `--profile` flag value (if given) → longest-prefix match on `path_defaults` in `~/.config/linear-cli/config.json` against CWD → hard error if neither ("no profile resolved for `<cwd>`; pass `--profile` or add a `path_defaults` entry"). No silent default — a fallback `default_profile` is a write-path footgun (filed-in-the-wrong-workspace bugs). The HTTP Authorization header at line 572 uses the resolved key. Also: `list-issues` and `lint` currently paginate a *team's* issues; both need a team-optional path (paginate workspace issues when the resolved profile has `team_key: null`). `--team` becomes an override that errors if the resolved profile is team-less. The legacy `LINEAR_API_KEY` env-var / `.env` walk-up path is removed entirely — no backward-compat surface, the tool requires a config.json.
+- **New module** `profiles.py`: pydantic model for `~/.config/linear-cli/config.json`. Shape:
+  ```json
+  {
+    "profiles": {
+      "foundation": { "api_key": "...", "team_key": "PLE", "labels": { "repo": ["placeframe", "make-it-sing", "infra"], "type": ["bug", "feature", "improvement", "chore", "refactor", "docs"] } },
+      "personal":   { "api_key": "...", "team_key": null, "labels": {} }
+    },
+    "path_defaults": {
+      "/workspace/placeframe": "foundation",
+      "/workspace/pulsar":     "personal"
+    }
+  }
+  ```
+  No `default_profile` — error on unresolved CWD instead. `team_key` and `labels` per profile carry the deterministic workspace facts an agent needs to write well-formed tickets (replaces the prose conventions that used to live in this repo's `AGENTS.md`); `labels` is a `dict[str, list[str]]` keyed by group name. Read function, write function (for an eventual `linear profile add` verb, out of scope here).
 - **`pyproject.toml`**: no structural changes; the existing `[project.scripts] linear = "linear_cli.cli:app"` is already correct for both `uv tool install` and per-repo git-reference.
-- **`AGENTS.md`**: add a Profiles section documenting the multi-workspace model. Keep the existing `Engineering/PLE` conventions doc as foundation-workspace-specific; add a note that a personal workspace is in play and may carry different conventions.
+- **`AGENTS.md`**: drop the workspace-specific content (the `Engineering/PLE` team sentence, the `repo`/`type` label group definitions) — those are deterministic data now living in config.json. Keep the universal tool-enforced conventions (ticket body template, declarative-outcome rules, absolute-link rule, "priority ignored," "sequence lives in `blocks`"). Add a brief Profiles section pointing at `~/.config/linear-cli/config.json` as the source of truth for workspace facts.
 
-Design doc to create at `design/multi-workspace-profiles.md` covering: the marker-file convention, the config-file format, the resolution precedence, why not just two env vars (`LINEAR_API_KEY_FOUNDATION` / `LINEAR_API_KEY_PERSONAL`) — answer: env-var-per-workspace scales linearly with workspace count, doesn't survive across `coi shell` env-var limits, and provides no per-repo defaulting.
+Design doc to create at `design/multi-workspace-profiles.md` covering: the config-file format and pydantic schema, the `path_defaults` longest-prefix resolution (no marker file, no walk-up — per-repo routing lives in user config, not committed to the repo, decoupling the repo from any particular workspace choice), the no-default-profile decision (silent fallback is a write-path footgun), the team-optional behavior for team-less workspaces, and the why-not-just-env-vars answer (env-var-per-workspace scales linearly with workspace count, doesn't survive across `coi shell` env-var limits, and provides no per-repo defaulting).
 
 Ticket to file in the **foundation** Linear workspace (the linear-cli repo's own work surfaces there): "Add multi-workspace profile support to linear-cli" — declarative outcome-ticket, links to the design doc by blob URL.
 
@@ -66,18 +79,18 @@ Ticket to file in the **foundation** Linear workspace (the linear-cli repo's own
 
 Mirror `configure_github_app.py` with a new `configure_linear.py`:
 
-- New `Linear` pydantic block on `PulsarConfig` (`sandbox_common.py`): `linear: Linear | None = None` where `Linear` carries `host_config_dir: Path` (default `~/.config/linear`).
-- `configure_linear.py`: bind-mount the host's `~/.config/linear/` dir read-only into the container at `/home/code/.config/linear/`. Idempotent disk-device add, same pattern as `ensure_github_app_key_mount`.
-- `start_slot.py`: no env-var forwarding needed (the mounted dir is sufficient once linear-cli reads from `~/.config/linear/config.toml`).
-- Pulsar's `AGENTS.md`: add a "Linear" item documenting the in-container path and the profile-defaulting convention for the pulsar repo (`.linear-profile` containing `personal`).
-- `build.sh` or `populate_sandbox_volumes`: add `uv tool install git+https://github.com/outernet-foundation/linear-cli.git` so every fresh container has the `linear` binary on PATH without per-repo ceremony. Pin to a rev (read it from somewhere — probably a `LINEAR_CLI_REV` env var in `config.toml` so bumps don't require image rebuild).
+- New `Linear` pydantic block on `PulsarConfig` (`sandbox_common.py`): `linear: Linear | None = None` where `Linear` carries `host_config_dir: Path` (default `~/.config/linear-cli`).
+- `configure_linear.py`: bind-mount the host's `~/.config/linear-cli/` dir read-only into the container at `/home/code/.config/linear-cli/`. Idempotent disk-device add, same pattern as `ensure_github_app_key_mount`.
+- `start_slot.py`: no env-var forwarding needed (the mounted dir is sufficient once linear-cli reads from `~/.config/linear-cli/config.json`).
+- Pulsar's `AGENTS.md`: add a "Linear" item documenting the in-container path. Pulsar's workspace facts (no team, any labels pulsar uses) are deterministic data living in config.json's `profiles.personal` block, not prose.
+- `build.sh` or `populate_sandbox_volumes`: add `uv tool install git+https://github.com/outernet-foundation/linear-cli.git@${LINEAR_CLI_REV}` so every fresh container has the `linear` binary on PATH without per-repo ceremony. `LINEAR_CLI_REV` is sourced from pulsar's `config.toml [environment]`, so bumps don't require image rebuild. Ad-hoc override during active linear-cli development: `uv tool install --force --with-editable /workspace/linear-cli/` (operator-run, not config-driven); re-install the pinned rev to exit dev mode.
 
 ### Phase 3 — operator setup
 
-- Create the personal Linear workspace in the Linear UI.
+Personal workspace already exists. Remaining steps:
+
 - Mint a personal-workspace API key.
-- Populate host `~/.config/linear/config.toml` with both profiles (foundation + personal).
-- Drop a `.linear-profile` marker file at the root of each repo (`foundation` for placeframe, `personal` for pulsar and any other personal repos).
+- Populate host `~/.config/linear-cli/config.json` with both profiles (foundation + personal) and `path_defaults` entries for `/workspace/placeframe` and `/workspace/pulsar`. No `.linear-profile` marker files — routing lives in config.
 - File the pulsar-overhaul close-out ticket in the personal workspace, link from pulsar's `bookmark.md`.
 
 ### Phase 4 — retire placeframe's per-repo git-reference
@@ -90,30 +103,18 @@ After Phase 1 ships and the operator has the global tool working:
 
 This is its own foundation-workspace ticket, sequenced after Phase 1 so the global tool is available before the per-repo install is removed.
 
-## Open questions to resolve before implementing
-
-These should be put to the operator before any code lands; the answers shape the design.
-
-1. **Personal workspace exists yet?** If not, that's a prerequisite for end-to-end testing (Phase 3). Code changes (Phases 1-2) can land first against a stub profile for testing, but the operator should confirm.
-2. **Team structure inside the personal workspace.** Foundation has one `Engineering` team with key `PLE`. Does the personal workspace get one team (e.g. `Personal`, key `PER`?) per-project teams (`pulsar`, `neutron`), or no teams (loose issues)? Affects what `--team` defaults to and whether the pulsar AGENTS.md needs a team-name convention.
-3. **Marker file format.** Plain text containing the profile name (`.linear-profile` with contents `personal\n`), or a structured file (TOML/JSON)? Plain text is simpler and matches the pulsar `.coi/profiles/<name>/` self-identification pattern; structured is more extensible.
-4. **Config file location.** `~/.config/linear/config.toml` (XDG, the obvious choice) vs `~/.config/pulsar/linear.toml` (alongside the existing pulsar config). The former is correct for a global tool; the latter conflates linear-cli config with pulsar config (wrong — linear-cli is not pulsar-specific). Recommend `~/.config/linear/config.toml`; confirm.
-5. **`uv tool install` rev pinning.** Where does the rev live? Options: (a) bake into `build.sh` with a `LINEAR_CLI_REV` env var from `config.toml [environment]`; (b) install `--latest` and trust the operator to bump; (c) install editable from the bind-mounted `/workspace/linear-cli/` checkout (dev-mode only, but very convenient for this exact development arc). Recommend (a) for production with (c) as an override during active linear-cli development.
-6. **Foundation workspace conventions doc** (`AGENTS.md` in this repo) currently asserts `One Engineering team, key PLE, owns all engineering work across the three repos (placeframe, make-it-sing, infra)`. Does pulsar get added to that sentence (making it four repos, all on the foundation `PLE` team) or does it live entirely in the personal workspace? The operator's intent ("for pulsar we want that to end up in the personal repo" — sic, presumably meant personal workspace) says the latter; confirm and then the conventions doc needs a sibling section for the personal workspace's conventions.
-7. **`lint --design-orphans`** today walks `design/*.md` relative to CWD and checks links from the authed workspace's tickets. With two workspaces, does it become per-profile (`linear lint --team PER --design-orphans` walks pulsar's design/ against the personal workspace) or does it walk both? Recommend per-profile, called from each repo against its own default.
-
 ## State of relevant repos at capture time
 
 - **linear-cli** (`/workspace/linear-cli/`): HEAD `b296f93` on `main`, working tree will be dirty after this bookmark lands. Public at `github.com/outernet-foundation/linear-cli`. Push access: agent has read-only GitHub App token, cannot push — operator pushes from host.
 - **pulsar** (`/workspace/pulsar/`): HEAD `e190b87` on `design/sandbox-overhaul`, 50 commits ahead of origin, unpushed. The overhaul is complete; see pulsar's `bookmark.md` for the full state. Push access: same as linear-cli, operator-side.
 - **placeframe** (`/workspace/placeframe/`): not modified by the linear-cli project until Phase 4. Currently git-pins linear-cli at `b296f93e...`.
-- **Host config**: `~/.config/pulsar/config.json` (invisible from inside the container) is where the new `linear` block on `PulsarConfig` will be authored by the operator. `~/.config/linear/` does not exist yet on the host.
+- **Host config**: `~/.config/pulsar/config.json` (invisible from inside the container) is where the new `linear` block on `PulsarConfig` will be authored by the operator. `~/.config/linear-cli/` does not exist yet on the host.
 
 ## First moves for a fresh session
 
 1. Read this file end-to-end. ✓
-2. Read `/workspace/linear-cli/AGENTS.md` end-to-end — it carries the workspace-conventions context this bookmark references but doesn't repeat.
+2. Read `/workspace/linear-cli/AGENTS.md` end-to-end — it carries the universal ticket-template conventions (tool-enforced via `validation.py`) that Phase 1 preserves verbatim. The workspace-specific facts (team key, labels) currently in that doc are scheduled to migrate into config.json under Phase 1.
 3. Skim `/workspace/linear-cli/src/linear_cli/cli.py` lines 560-590 (the HTTP call site), 670-706 (the `_find_up` + `_api_key` pair). These are the surgical sites for Phase 1.
 4. Skim `/workspace/pulsar/scripts/src/scripts/sandbox/configure_github_app.py` end-to-end — it's the template for the Phase 2 `configure_linear.py`. Pulsar's `AGENTS.md` items 3 and 4 cover the GitHub App flow at a higher level.
-5. Put the open questions to the operator. Don't start writing code until at least questions 1, 2, 4, and 6 are answered — they shape the schema and the conventions doc.
-6. Once answered, file the foundation-workspace ticket for Phase 1 (`linear profile add` design + impl) using the existing `linear create-issue` verb against the foundation workspace. Then begin.
+5. Skim pulsar's `~/.config/pulsar/config.json` schema at `scripts/src/scripts/sandbox/sandbox_common.py:162-167` (`PulsarConfig`) as the structural template for `~/.config/linear-cli/config.json`.
+6. File the foundation-workspace ticket for Phase 1 ("Add multi-workspace profile support to linear-cli") using the existing `linear create-issue` verb against the foundation workspace. Design is locked; begin implementing `profiles.py` + the `cli.py` resolution change against the schema above.
