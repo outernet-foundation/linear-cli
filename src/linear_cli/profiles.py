@@ -14,7 +14,7 @@ class _Model(BaseModel):
 
 class Profile(_Model):
     api_key: str
-    team_key: str | None = None
+    team_key: str
 
 
 class ProfileConfig(_Model):
@@ -51,15 +51,7 @@ def resolve_profile_name(config: ProfileConfig, override: str | None, cwd: Path)
 
 
 def require_team(profile: Profile, override: str | None) -> str:
-    team = override if override is not None else profile.team_key
-    if team is None:
-        typer.echo(
-            "No team resolved; pass --team or set team_key on the profile in "
-            f"{CONFIG_PATH}. Linear requires a team for this operation.",
-            err=True,
-        )
-        raise typer.Exit(1)
-    return team
+    return override if override is not None else profile.team_key
 
 
 def write_config(config: ProfileConfig, path: Path = CONFIG_PATH) -> None:
