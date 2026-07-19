@@ -170,6 +170,10 @@ class ProjectMutationPayload(_Model):
     project: CreatedProject | None = None
 
 
+class ProjectDeletePayload(_Model):
+    success: bool
+
+
 class IssueMutationPayload(_Model):
     success: bool
     issue: CreatedIssue | None = None
@@ -234,6 +238,10 @@ class ProjectCreateData(_Model):
 
 class ProjectUpdateData(_Model):
     project_update: ProjectMutationPayload = Field(alias="projectUpdate")
+
+
+class ProjectDeleteData(_Model):
+    project_delete: ProjectDeletePayload = Field(alias="projectDelete")
 
 
 class IssueCreateData(_Model):
@@ -470,6 +478,15 @@ def update_project(
     payload = graphql("UpdateProject", {"id": project_id, "input": fields}, ProjectUpdateData).project_update
     project = _require(payload.success, payload.project, f"Failed to update project {project_id!r}")
     _emit({"id": project.id, "url": project.url})
+
+
+@app.command(name="delete-project")
+def delete_project(
+    project_id: Annotated[str, typer.Option("--id", help="Project id to delete")],
+) -> None:
+    payload = graphql("DeleteProject", {"id": project_id}, ProjectDeleteData).project_delete
+    _require_ok(payload.success, f"Failed to delete project {project_id!r}")
+    _emit({"id": project_id, "deleted": True})
 
 
 @app.command(

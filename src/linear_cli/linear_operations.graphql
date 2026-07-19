@@ -180,6 +180,12 @@ mutation UpdateProject($id: String!, $input: ProjectUpdateInput!) {
   }
 }
 
+mutation DeleteProject($id: String!) {
+  projectDelete(id: $id) {
+    success
+  }
+}
+
 mutation UpdateIssue($id: String!, $input: IssueUpdateInput!) {
   issueUpdate(id: $id, input: $input) {
     success
