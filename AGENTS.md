@@ -39,6 +39,10 @@ Profile resolution order: `--profile <name>` flag (if given) → longest-prefix 
 
 **Projects** exist only for real multi-issue initiatives. A project's direct issues are its phases/workstreams; sequence between them is modeled with `blocks` relations, and each phase explodes into ~1:1-with-PR sub-issues when it is picked up.
 
+A ticket's **team** picks its lifecycle — Linear workflow states are team-scoped, so PLE carries the engineering lifecycle (Backlog → Todo → In Progress → In Review → Done) and GOV carries the parliamentary lifecycle (Drafted → In Director Review → On Agenda → Voted Adopted → …). A ticket's **project** picks its scope — a project groups related work, can span multiple teams, and is the unit of "this is governance work" / "this is the Q3 launch." The two are orthogonal: an engineering chore for a governance workstream (write the build script) is team=PLE, project=Foundation Governance. Decide team first ("what status workflow does this follow?"), then project ("what scope does this belong to?").
+
+A project's `teamIds` list gates which teams' issues it can collect. `update-issue --project X` on an issue whose team isn't in project X's `teamIds` fails with "Discrepancy between issue team and state, cycle or project" — the fix is `update-project --id X --team <existing> --team <new>` (repeatable) to extend the team set, not `update-issue --team` to move the ticket.
+
 ## Constraints
 
 **Direct GraphQL, not MCP and not hand-rolled `curl`.** The workspace is written to rarely and by few actors, so MCP's managed-OAuth convenience does not pay for its opacity; a direct client is portable to every context (agent, CI, by hand) and every mutation is one auditable HTTP call. Every write goes through a tool verb — do not hand-write mutations or add an MCP. When a new kind of write is needed, add a verb and its named operation.
