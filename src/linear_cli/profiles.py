@@ -14,16 +14,11 @@ class _Model(BaseModel):
 
 class Profile(_Model):
     api_key: str
-
-
-class PathBinding(_Model):
-    profile: str
-    team: str | None = None
+    paths: list[str] = Field(default_factory=list)
 
 
 class ProfileConfig(_Model):
     profiles: dict[str, Profile]
-    path_defaults: dict[str, PathBinding] = Field(default_factory=dict)
 
 
 def load_config(path: Path = CONFIG_PATH) -> ProfileConfig | None:
@@ -32,30 +27,37 @@ def load_config(path: Path = CONFIG_PATH) -> ProfileConfig | None:
     return ProfileConfig.model_validate_json(path.read_text(encoding="utf-8"))
 
 
-def resolve_path_binding(
+def flatten_paths(config: ProfileConfig) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for profile_name, profile in config.profiles.items():
+        for path in profile.paths:
+            result[path] = profile_name
+    return result
+
+
+def resolve_profile_name(
     config: ProfileConfig,
     profile_override: str | None,
     cwd: Path,
-) -> PathBinding:
+) -> str:
     if profile_override is not None:
         if profile_override not in config.profiles:
             available = ", ".join(sorted(config.profiles))
             typer.echo(f"No profile named {profile_override!r}; available profiles: {available}", err=True)
             raise typer.Exit(1)
-        return PathBinding(profile=profile_override, team=None)
+        return profile_override
 
+    path_map = flatten_paths(config)
     cwd_str = str(cwd.resolve())
-    matching = [
-        prefix for prefix in config.path_defaults if cwd_str == prefix or cwd_str.startswith(prefix.rstrip("/") + "/")
-    ]
+    matching = [prefix for prefix in path_map if cwd_str == prefix or cwd_str.startswith(prefix.rstrip("/") + "/")]
     if not matching:
         typer.echo(
-            f"No path binding for {cwd_str}; pass --profile <name> or add a path_defaults entry in {CONFIG_PATH}",
+            f"No profile resolved for {cwd_str}; pass --profile <name> or add the path to a profile's paths list in {CONFIG_PATH}",
             err=True,
         )
         raise typer.Exit(1)
 
-    return config.path_defaults[max(matching, key=len)]
+    return path_map[max(matching, key=len)]
 
 
 def write_config(config: ProfileConfig, path: Path = CONFIG_PATH) -> None:

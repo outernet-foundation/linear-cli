@@ -16,9 +16,8 @@ from .profiles import (
     CONFIG_PATH,
     Profile,
     ProfileConfig,
-    PathBinding,
     load_config,
-    resolve_path_binding,
+    resolve_profile_name,
 )
 from .snapshot import identifier_sort_key, label_snapshot_filter
 from .validation import orphan_design_docs, validate_body, validate_title
@@ -351,9 +350,7 @@ def root_callback(
 def list_issues(
     team: Annotated[str | None, typer.Option("--team", help="Team key to filter by, e.g. PLE")] = None,
 ) -> None:
-    for issue in _paginate(
-        "Issues", {"filter": _team_filter(_resolved_team(team))}, IssuesData, lambda data: data.issues
-    ):
+    for issue in _paginate("Issues", {"filter": _team_filter(team)}, IssuesData, lambda data: data.issues):
         _emit({
             "id": issue.id,
             "identifier": issue.identifier,
@@ -397,7 +394,7 @@ def list_relations(
     team: Annotated[str | None, typer.Option("--team", help="Team key to filter by, e.g. PLE")] = None,
 ) -> None:
     for issue in _paginate(
-        "IssueRelations", {"filter": _team_filter(_resolved_team(team))}, IssueRelationsData, lambda data: data.issues
+        "IssueRelations", {"filter": _team_filter(team)}, IssueRelationsData, lambda data: data.issues
     ):
         for relation in issue.relations.nodes:
             if relation.related_issue is None:
@@ -421,12 +418,9 @@ def list_teams() -> None:
 
 @app.command(name="list-workflow-states")
 def list_workflow_states(
-    team: Annotated[str | None, typer.Option("--team", help="Team key, e.g. PLE")] = None,
+    team: Annotated[str, typer.Option("--team", help="Team key, e.g. GOV")],
 ) -> None:
-    resolved_team = _require_team(team)
-    states = graphql(
-        "WorkflowStates", {"filter": _team_filter(resolved_team)}, WorkflowStatesData
-    ).workflow_states.nodes
+    states = graphql("WorkflowStates", {"filter": _team_filter(team)}, WorkflowStatesData).workflow_states.nodes
     for state in states:
         _emit({"id": state.id, "name": state.name, "type": state.type})
 
@@ -458,9 +452,8 @@ def create_workflow_state(
     description: Annotated[str | None, typer.Option("--description", help="Optional state description")] = None,
     position: Annotated[float | None, typer.Option("--position", help="Position (ordering)")] = None,
 ) -> None:
-    resolved_team = _require_team(team)
     fields: dict[str, object] = {
-        "teamId": _resolve_team_id(resolved_team),
+        "teamId": _resolve_team_id(team),
         "name": name,
         "type": state_type,
         "color": color,
@@ -516,9 +509,7 @@ def lint(
 ) -> None:
     offenders = 0
     open_bodies: list[str] = []
-    for issue in _paginate(
-        "Issues", {"filter": _team_filter(_resolved_team(team))}, IssuesData, lambda data: data.issues
-    ):
+    for issue in _paginate("Issues", {"filter": _team_filter(team)}, IssuesData, lambda data: data.issues):
         if issue.state.type in ("completed", "canceled"):
             continue
 
@@ -607,12 +598,11 @@ def delete_label(
 @app.command(name="create-project", help="Reads the project content (markdown body) from stdin.")
 def create_project(
     name: Annotated[str, typer.Option("--name", help="Project name")],
-    team: Annotated[str | None, typer.Option("--team", help="Team key the project belongs to, e.g. PLE")] = None,
+    team: Annotated[str, typer.Option("--team", help="Team key the project belongs to, e.g. PLE")],
     summary: Annotated[str, typer.Option("--summary", help="One-line project description")] = "",
 ) -> None:
     content = _read_stdin()
-    resolved_team = _require_team(team)
-    fields: dict[str, object] = {"name": name, "teamIds": [_resolve_team_id(resolved_team)]}
+    fields: dict[str, object] = {"name": name, "teamIds": [_resolve_team_id(team)]}
     if summary:
         fields["description"] = summary
     if content.strip():
@@ -642,8 +632,7 @@ def update_project(
     if content.strip():
         fields["content"] = content
     if team is not None:
-        resolved_team = _require_team(team)
-        fields["teamIds"] = [_resolve_team_id(resolved_team)]
+        fields["teamIds"] = [_resolve_team_id(team)]
 
     _require_fields(fields, "Nothing to update; pass --team, --name, --summary, or a body on stdin")
 
@@ -667,14 +656,13 @@ def delete_project(
 )
 def create_issue(
     title: Annotated[str, typer.Option("--title", help="Issue title")],
-    team: Annotated[str | None, typer.Option("--team", help="Team key, e.g. PLE")] = None,
+    team: Annotated[str, typer.Option("--team", help="Team key, e.g. PLE")],
     project: Annotated[str | None, typer.Option("--project", help="Project id to file the issue under")] = None,
     label: Annotated[list[str] | None, typer.Option("--label", help="Label id to attach (repeatable)")] = None,
 ) -> None:
     description = _read_stdin()
     _enforce_conventions(title, description)
-    resolved_team = _require_team(team)
-    fields: dict[str, object] = {"teamId": _resolve_team_id(resolved_team), "title": title}
+    fields: dict[str, object] = {"teamId": _resolve_team_id(team), "title": title}
     if description.strip():
         fields["description"] = description
     if project is not None:
@@ -714,17 +702,16 @@ def update_issue(
     if label:
         fields["labelIds"] = label
     if team is not None:
-        resolved_team_key = _require_team(team)
-        fields["teamId"] = _resolve_team_id(resolved_team_key)
+        fields["teamId"] = _resolve_team_id(team)
     if state is not None:
-        resolved_state_team = _require_team(team)
-        states = graphql(
-            "WorkflowStates", {"filter": _team_filter(resolved_state_team)}, WorkflowStatesData
-        ).workflow_states.nodes
+        if team is None:
+            typer.echo("--state requires --team to specify which team's workflow to resolve against", err=True)
+            raise typer.Exit(1)
+        states = graphql("WorkflowStates", {"filter": _team_filter(team)}, WorkflowStatesData).workflow_states.nodes
         matches = [candidate for candidate in states if candidate.name.casefold() == state.casefold()]
         if len(matches) != 1:
             available = ", ".join(sorted(candidate.name for candidate in states))
-            typer.echo(f"No unique state {state!r} in team {resolved_state_team!r}; available: {available}", err=True)
+            typer.echo(f"No unique state {state!r} in team {team!r}; available: {available}", err=True)
             raise typer.Exit(1)
 
         fields["stateId"] = matches[0].id
@@ -943,25 +930,6 @@ def _api_key() -> str:
     return _resolved_profile().api_key
 
 
-def _resolved_team(override: str | None) -> str | None:
-    if override is not None:
-        return override
-
-    return _resolved_binding().team
-
-
-def _require_team(override: str | None) -> str:
-    team = _resolved_team(override)
-    if team is None:
-        typer.echo(
-            "No team resolved; pass --team KEY or add a 'team' field to this path's entry in path_defaults.",
-            err=True,
-        )
-        raise typer.Exit(1)
-
-    return team
-
-
 @cache
 def _load_config_or_die() -> ProfileConfig:
     config = load_config()
@@ -976,16 +944,12 @@ def _load_config_or_die() -> ProfileConfig:
 
 
 @cache
-def _resolved_binding() -> PathBinding:
-    return resolve_path_binding(_load_config_or_die(), _CliState.profile_override, Path.cwd())
+def _resolved_profile_name() -> str:
+    return resolve_profile_name(_load_config_or_die(), _CliState.profile_override, Path.cwd())
 
 
 def _resolved_profile() -> Profile:
-    return _load_config_or_die().profiles[_resolved_binding().profile]
-
-
-def _resolved_profile_name() -> str:
-    return _resolved_binding().profile
+    return _load_config_or_die().profiles[_resolved_profile_name()]
 
 
 def _emit(record: dict[str, object]) -> None:
