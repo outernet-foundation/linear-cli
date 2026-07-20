@@ -619,8 +619,8 @@ def update_project(
     name: Annotated[str | None, typer.Option("--name", help="New project name")] = None,
     summary: Annotated[str | None, typer.Option("--summary", help="New one-line description")] = None,
     team: Annotated[
-        str | None,
-        typer.Option("--team", help="Team key to re-home the project to, e.g. GOV"),
+        list[str] | None,
+        typer.Option("--team", help="Team key for the project (repeatable); replaces the project's team set"),
     ] = None,
 ) -> None:
     content = _read_stdin()
@@ -632,7 +632,10 @@ def update_project(
     if content.strip():
         fields["content"] = content
     if team is not None:
-        fields["teamIds"] = [_resolve_team_id(team)]
+        if len(team) == 0:
+            typer.echo("--team requires at least one team key", err=True)
+            raise typer.Exit(1)
+        fields["teamIds"] = [_resolve_team_id(key) for key in team]
 
     _require_fields(fields, "Nothing to update; pass --team, --name, --summary, or a body on stdin")
 
