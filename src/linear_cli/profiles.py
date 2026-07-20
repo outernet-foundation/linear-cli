@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import typer
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, RootModel
 
 CONFIG_PATH = Path.home() / ".config" / "linear-cli" / "config.json"
 
@@ -17,8 +17,8 @@ class Profile(_Model):
     paths: list[str] = Field(default_factory=list)
 
 
-class ProfileConfig(_Model):
-    profiles: dict[str, Profile]
+class ProfileConfig(RootModel[dict[str, Profile]]):
+    root: dict[str, Profile] = Field(default_factory=dict)
 
 
 def load_config(path: Path = CONFIG_PATH) -> ProfileConfig | None:
@@ -29,7 +29,7 @@ def load_config(path: Path = CONFIG_PATH) -> ProfileConfig | None:
 
 def flatten_paths(config: ProfileConfig) -> dict[str, str]:
     result: dict[str, str] = {}
-    for profile_name, profile in config.profiles.items():
+    for profile_name, profile in config.root.items():
         for path in profile.paths:
             result[path] = profile_name
     return result
@@ -41,8 +41,8 @@ def resolve_profile_name(
     cwd: Path,
 ) -> str:
     if profile_override is not None:
-        if profile_override not in config.profiles:
-            available = ", ".join(sorted(config.profiles))
+        if profile_override not in config.root:
+            available = ", ".join(sorted(config.root))
             typer.echo(f"No profile named {profile_override!r}; available profiles: {available}", err=True)
             raise typer.Exit(1)
         return profile_override

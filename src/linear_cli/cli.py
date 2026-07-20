@@ -949,7 +949,7 @@ def _resolved_profile_name() -> str:
 
 
 def _resolved_profile() -> Profile:
-    return _load_config_or_die().profiles[_resolved_profile_name()]
+    return _load_config_or_die().root[_resolved_profile_name()]
 
 
 def _emit(record: dict[str, object]) -> None:

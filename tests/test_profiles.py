@@ -1,12 +1,12 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 import typer
 
 from linear_cli.profiles import (
-    Profile,
     ProfileConfig,
     flatten_paths,
     load_config,
@@ -16,24 +16,20 @@ from linear_cli.profiles import (
 
 
 def _config() -> ProfileConfig:
-    return ProfileConfig(
-        profiles={
-            "foundation": Profile(
-                api_key="key-foundation",
-                paths=[
-                    "/workspace/placeframe",
-                    "/workspace/placeframe/deeply/nested",
-                    "/workspace/governance",
-                ],
-            ),
-            "personal": Profile(
-                api_key="key-personal",
-                paths=[
-                    "/workspace/pulsar",
-                ],
-            ),
+    return ProfileConfig.model_validate({
+        "foundation": {
+            "api_key": "key-foundation",
+            "paths": [
+                "/workspace/placeframe",
+                "/workspace/placeframe/deeply/nested",
+                "/workspace/governance",
+            ],
         },
-    )
+        "personal": {
+            "api_key": "key-personal",
+            "paths": ["/workspace/pulsar"],
+        },
+    })
 
 
 def test_flatten_paths_maps_each_path_to_its_profile() -> None:
@@ -85,24 +81,29 @@ def test_load_config_returns_none_when_missing(tmp_path: Path) -> None:
     assert load_config(tmp_path / "missing.json") is None
 
 
-def test_write_then_load_round_trips(tmp_path: Path) -> None:
+def test_write_then_load_round_trips_bare_map(tmp_path: Path) -> None:
     path = tmp_path / "linear-cli" / "config.json"
     original = _config()
     write_config(original, path)
     loaded = load_config(path)
     assert loaded is not None
-    assert loaded.profiles["foundation"].api_key == "key-foundation"
-    assert loaded.profiles["foundation"].paths == [
+    assert loaded.root["foundation"].api_key == "key-foundation"
+    assert loaded.root["foundation"].paths == [
         "/workspace/placeframe",
         "/workspace/placeframe/deeply/nested",
         "/workspace/governance",
     ]
-    assert loaded.profiles["personal"].paths == ["/workspace/pulsar"]
+    assert loaded.root["personal"].paths == ["/workspace/pulsar"]
+
+
+def test_config_serializes_as_bare_map_not_wrapped() -> None:
+    serialized = json.loads(_config().model_dump_json())
+    assert "foundation" in serialized
+    assert "personal" in serialized
+    assert "profiles" not in serialized
 
 
 def test_config_with_no_paths_anywhere_forces_explicit_profile() -> None:
-    config = ProfileConfig(
-        profiles={"foundation": Profile(api_key="key")},
-    )
+    config = ProfileConfig.model_validate({"foundation": {"api_key": "key"}})
     with pytest.raises(typer.Exit):
         resolve_profile_name(config, None, Path("/workspace/anything"))
