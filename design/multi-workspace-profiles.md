@@ -8,24 +8,26 @@ Design rationale for the profile system that lets `linear-cli` write to multiple
 
 ## Config file
 
-Workspace credentials and per-repo routing live in `~/.config/linear-cli/config.json`:
+Workspace credentials and per-repo routing live in `~/.config/linear-cli/config.json`. The file is a bare map of profile-name → workspace — no top-level wrapper key, because there's only one top-level concept:
 
 ```json
 {
-  "profiles": {
-    "foundation": {
-      "api_key": "lin_api_...",
-      "paths": ["/workspace/placeframe", "/workspace/governance", "/workspace/linear-cli"]
-    },
-    "personal": {
-      "api_key": "lin_api_...",
-      "paths": ["/workspace/pulsar"]
-    }
+  "foundation": {
+    "api_key": "lin_api_...",
+    "paths": ["/workspace/placeframe", "/workspace/governance", "/workspace/linear-cli"]
+  },
+  "personal": {
+    "api_key": "lin_api_...",
+    "paths": ["/workspace/pulsar"]
   }
 }
 ```
 
 Location: `~/.config/linear-cli/` (the `-cli` suffix disambiguates from any future official Linear Inc. tooling). Format: JSON, matching the pulsar config convention at `~/.config/pulsar/config.json`. Schema: `profiles.py` pydantic models.
+
+### Why no top-level wrapper key
+
+An earlier draft wrapped the workspace map in a `profiles` field, leaving room for sibling top-level keys (`version`, `defaults`, etc.). With only one top-level concept actually in the schema, the wrapper was pure ceremony: every entry moved one indent deeper without buying anything. The shape now mirrors the on-disk reality — the file IS a map of workspaces. If top-level metadata (schema version, etc.) is needed later, it can be added by reserving a leading-underscore namespace (`_version`) without restructuring existing entries; YAGNI applies until then.
 
 ### Why paths are nested under profiles, with flattening on load
 

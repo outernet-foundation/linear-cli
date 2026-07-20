@@ -12,19 +12,17 @@ Requires Python 3.13+ and [uv](https://docs.astral.sh/uv/).
 uv sync
 ```
 
-Create `~/.config/linear-cli/config.json` with one block per Linear workspace. Each profile carries the workspace's API key and the list of filesystem paths that route to it (paths are nested under profiles and flattened on load):
+Create `~/.config/linear-cli/config.json` as a map of profile-name → workspace. Each profile carries the workspace's API key and the list of filesystem paths that route to it (paths are nested under profiles and flattened on load):
 
 ```json
 {
-  "profiles": {
-    "foundation": {
-      "api_key": "lin_api_...",
-      "paths": ["/workspace/placeframe", "/workspace/governance", "/workspace/linear-cli"]
-    },
-    "personal": {
-      "api_key": "lin_api_...",
-      "paths": ["/workspace/pulsar"]
-    }
+  "foundation": {
+    "api_key": "lin_api_...",
+    "paths": ["/workspace/placeframe", "/workspace/governance", "/workspace/linear-cli"]
+  },
+  "personal": {
+    "api_key": "lin_api_...",
+    "paths": ["/workspace/pulsar"]
   }
 }
 ```
