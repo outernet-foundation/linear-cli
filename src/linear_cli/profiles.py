@@ -14,12 +14,16 @@ class _Model(BaseModel):
 
 class Profile(_Model):
     api_key: str
-    team_key: str
+
+
+class PathBinding(_Model):
+    profile: str
+    team: str | None = None
 
 
 class ProfileConfig(_Model):
     profiles: dict[str, Profile]
-    path_defaults: dict[str, str] = Field(default_factory=dict)
+    path_defaults: dict[str, PathBinding] = Field(default_factory=dict)
 
 
 def load_config(path: Path = CONFIG_PATH) -> ProfileConfig | None:
@@ -28,13 +32,17 @@ def load_config(path: Path = CONFIG_PATH) -> ProfileConfig | None:
     return ProfileConfig.model_validate_json(path.read_text(encoding="utf-8"))
 
 
-def resolve_profile_name(config: ProfileConfig, override: str | None, cwd: Path) -> str:
-    if override is not None:
-        if override not in config.profiles:
+def resolve_path_binding(
+    config: ProfileConfig,
+    profile_override: str | None,
+    cwd: Path,
+) -> PathBinding:
+    if profile_override is not None:
+        if profile_override not in config.profiles:
             available = ", ".join(sorted(config.profiles))
-            typer.echo(f"No profile named {override!r}; available profiles: {available}", err=True)
+            typer.echo(f"No profile named {profile_override!r}; available profiles: {available}", err=True)
             raise typer.Exit(1)
-        return override
+        return PathBinding(profile=profile_override, team=None)
 
     cwd_str = str(cwd.resolve())
     matching = [
@@ -42,16 +50,12 @@ def resolve_profile_name(config: ProfileConfig, override: str | None, cwd: Path)
     ]
     if not matching:
         typer.echo(
-            f"No profile resolved for {cwd_str}; pass --profile <name> or add a path_defaults entry in {CONFIG_PATH}",
+            f"No path binding for {cwd_str}; pass --profile <name> or add a path_defaults entry in {CONFIG_PATH}",
             err=True,
         )
         raise typer.Exit(1)
 
     return config.path_defaults[max(matching, key=len)]
-
-
-def require_team(profile: Profile, override: str | None) -> str:
-    return override if override is not None else profile.team_key
 
 
 def write_config(config: ProfileConfig, path: Path = CONFIG_PATH) -> None:

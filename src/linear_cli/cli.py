@@ -15,9 +15,10 @@ from pydantic import BaseModel, ConfigDict, Field
 from .profiles import (
     CONFIG_PATH,
     Profile,
+    ProfileConfig,
+    PathBinding,
     load_config,
-    require_team,
-    resolve_profile_name,
+    resolve_path_binding,
 )
 from .snapshot import identifier_sort_key, label_snapshot_filter
 from .validation import orphan_design_docs, validate_body, validate_title
@@ -422,7 +423,7 @@ def list_teams() -> None:
 def list_workflow_states(
     team: Annotated[str | None, typer.Option("--team", help="Team key, e.g. PLE")] = None,
 ) -> None:
-    resolved_team = require_team(_resolved_profile(), team)
+    resolved_team = _require_team(team)
     states = graphql(
         "WorkflowStates", {"filter": _team_filter(resolved_team)}, WorkflowStatesData
     ).workflow_states.nodes
@@ -457,7 +458,7 @@ def create_workflow_state(
     description: Annotated[str | None, typer.Option("--description", help="Optional state description")] = None,
     position: Annotated[float | None, typer.Option("--position", help="Position (ordering)")] = None,
 ) -> None:
-    resolved_team = require_team(_resolved_profile(), team)
+    resolved_team = _require_team(team)
     fields: dict[str, object] = {
         "teamId": _resolve_team_id(resolved_team),
         "name": name,
@@ -610,7 +611,7 @@ def create_project(
     summary: Annotated[str, typer.Option("--summary", help="One-line project description")] = "",
 ) -> None:
     content = _read_stdin()
-    resolved_team = require_team(_resolved_profile(), team)
+    resolved_team = _require_team(team)
     fields: dict[str, object] = {"name": name, "teamIds": [_resolve_team_id(resolved_team)]}
     if summary:
         fields["description"] = summary
@@ -641,7 +642,7 @@ def update_project(
     if content.strip():
         fields["content"] = content
     if team is not None:
-        resolved_team = require_team(_resolved_profile(), team)
+        resolved_team = _require_team(team)
         fields["teamIds"] = [_resolve_team_id(resolved_team)]
 
     _require_fields(fields, "Nothing to update; pass --team, --name, --summary, or a body on stdin")
@@ -672,7 +673,7 @@ def create_issue(
 ) -> None:
     description = _read_stdin()
     _enforce_conventions(title, description)
-    resolved_team = require_team(_resolved_profile(), team)
+    resolved_team = _require_team(team)
     fields: dict[str, object] = {"teamId": _resolve_team_id(resolved_team), "title": title}
     if description.strip():
         fields["description"] = description
@@ -713,10 +714,10 @@ def update_issue(
     if label:
         fields["labelIds"] = label
     if team is not None:
-        resolved_team_key = require_team(_resolved_profile(), team)
+        resolved_team_key = _require_team(team)
         fields["teamId"] = _resolve_team_id(resolved_team_key)
     if state is not None:
-        resolved_state_team = require_team(_resolved_profile(), team)
+        resolved_state_team = _require_team(team)
         states = graphql(
             "WorkflowStates", {"filter": _team_filter(resolved_state_team)}, WorkflowStatesData
         ).workflow_states.nodes
@@ -946,21 +947,23 @@ def _resolved_team(override: str | None) -> str | None:
     if override is not None:
         return override
 
-    return _resolved_profile().team_key
+    return _resolved_binding().team
+
+
+def _require_team(override: str | None) -> str:
+    team = _resolved_team(override)
+    if team is None:
+        typer.echo(
+            "No team resolved; pass --team KEY or add a 'team' field to this path's entry in path_defaults.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    return team
 
 
 @cache
-def _resolved_profile() -> Profile:
-    return _resolved_profile_and_name()[1]
-
-
-@cache
-def _resolved_profile_name() -> str:
-    return _resolved_profile_and_name()[0]
-
-
-@cache
-def _resolved_profile_and_name() -> tuple[str, Profile]:
+def _load_config_or_die() -> ProfileConfig:
     config = load_config()
     if config is None:
         typer.echo(
@@ -969,8 +972,20 @@ def _resolved_profile_and_name() -> tuple[str, Profile]:
         )
         raise typer.Exit(1)
 
-    name = resolve_profile_name(config, _CliState.profile_override, Path.cwd())
-    return name, config.profiles[name]
+    return config
+
+
+@cache
+def _resolved_binding() -> PathBinding:
+    return resolve_path_binding(_load_config_or_die(), _CliState.profile_override, Path.cwd())
+
+
+def _resolved_profile() -> Profile:
+    return _load_config_or_die().profiles[_resolved_binding().profile]
+
+
+def _resolved_profile_name() -> str:
+    return _resolved_binding().profile
 
 
 def _emit(record: dict[str, object]) -> None:

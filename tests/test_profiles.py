@@ -6,11 +6,11 @@ import pytest
 import typer
 
 from linear_cli.profiles import (
+    PathBinding,
     Profile,
     ProfileConfig,
     load_config,
-    require_team,
-    resolve_profile_name,
+    resolve_path_binding,
     write_config,
 )
 
@@ -18,63 +18,69 @@ from linear_cli.profiles import (
 def _config() -> ProfileConfig:
     return ProfileConfig(
         profiles={
-            "foundation": Profile(api_key="key-foundation", team_key="PLE"),
-            "personal": Profile(api_key="key-personal", team_key="TYL"),
+            "foundation": Profile(api_key="key-foundation"),
+            "personal": Profile(api_key="key-personal"),
         },
         path_defaults={
-            "/workspace/placeframe": "foundation",
-            "/workspace/pulsar": "personal",
-            "/workspace/placeframe/deeply/nested": "foundation",
+            "/workspace/placeframe": PathBinding(profile="foundation", team="PLE"),
+            "/workspace/pulsar": PathBinding(profile="personal", team="TYL"),
+            "/workspace/governance": PathBinding(profile="foundation", team="GOV"),
+            "/workspace/placeframe/deeply/nested": PathBinding(profile="foundation", team="PLE"),
         },
     )
 
 
-def test_override_wins() -> None:
+def test_override_wins_and_clears_team() -> None:
     config = _config()
-    assert resolve_profile_name(config, "personal", Path("/workspace/placeframe")) == "personal"
+    binding = resolve_path_binding(config, "personal", Path("/workspace/placeframe"))
+    assert binding.profile == "personal"
+    assert binding.team is None
 
 
 def test_override_unknown_profile_errors() -> None:
     config = _config()
     with pytest.raises(typer.Exit):
-        resolve_profile_name(config, "nonexistent", Path("/workspace/placeframe"))
+        resolve_path_binding(config, "nonexistent", Path("/workspace/placeframe"))
 
 
-def test_exact_path_match() -> None:
+def test_exact_path_match_returns_full_binding() -> None:
     config = _config()
-    assert resolve_profile_name(config, None, Path("/workspace/pulsar")) == "personal"
+    binding = resolve_path_binding(config, None, Path("/workspace/pulsar"))
+    assert binding.profile == "personal"
+    assert binding.team == "TYL"
 
 
 def test_longest_prefix_wins() -> None:
     config = _config()
-    assert resolve_profile_name(config, None, Path("/workspace/placeframe/deeply/nested")) == "foundation"
+    binding = resolve_path_binding(config, None, Path("/workspace/placeframe/deeply/nested"))
+    assert binding.profile == "foundation"
+    assert binding.team == "PLE"
 
 
-def test_prefix_below_registered_path_matches_parent() -> None:
+def test_prefix_below_registered_path_inherits_parent_binding() -> None:
     config = _config()
-    assert resolve_profile_name(config, None, Path("/workspace/pulsar/scripts/src")) == "personal"
+    binding = resolve_path_binding(config, None, Path("/workspace/pulsar/scripts/src"))
+    assert binding.profile == "personal"
+    assert binding.team == "TYL"
+
+
+def test_governance_path_uses_foundation_credentials_with_gov_team() -> None:
+    config = _config()
+    binding = resolve_path_binding(config, None, Path("/workspace/governance"))
+    assert binding.profile == "foundation"
+    assert binding.team == "GOV"
 
 
 def test_sibling_directory_does_not_match() -> None:
     config = _config()
     with pytest.raises(typer.Exit):
-        resolve_profile_name(config, None, Path("/workspace/placeframe-foo"))
+        resolve_path_binding(config, None, Path("/workspace/placeframe-foo"))
 
 
 def test_no_match_errors() -> None:
     config = _config()
     with pytest.raises(typer.Exit):
-        resolve_profile_name(config, None, Path("/var/empty"))
-
-
-def test_require_team_uses_override() -> None:
-    profile = Profile(api_key="key", team_key="PLE")
-    assert require_team(profile, "OTHER") == "OTHER"
-
-
-def test_require_team_uses_profile_default() -> None:
-    profile = Profile(api_key="key", team_key="PLE")
-    assert require_team(profile, None) == "PLE"
+        resolve_path_binding(config, None, Path("/var/empty"))
 
 
 def test_load_config_returns_none_when_missing(tmp_path: Path) -> None:
@@ -88,15 +94,24 @@ def test_write_then_load_round_trips(tmp_path: Path) -> None:
     loaded = load_config(path)
     assert loaded is not None
     assert loaded.profiles["foundation"].api_key == "key-foundation"
-    assert loaded.profiles["foundation"].team_key == "PLE"
-    assert loaded.profiles["personal"].team_key == "TYL"
-    assert loaded.path_defaults["/workspace/pulsar"] == "personal"
+    assert loaded.path_defaults["/workspace/pulsar"].profile == "personal"
+    assert loaded.path_defaults["/workspace/pulsar"].team == "TYL"
+    assert loaded.path_defaults["/workspace/governance"].team == "GOV"
 
 
 def test_config_with_empty_path_defaults_forces_explicit_profile() -> None:
     config = ProfileConfig(
-        profiles={"foundation": Profile(api_key="key", team_key="PLE")},
+        profiles={"foundation": Profile(api_key="key")},
         path_defaults={},
     )
     with pytest.raises(typer.Exit):
-        resolve_profile_name(config, None, Path("/workspace/anything"))
+        resolve_path_binding(config, None, Path("/workspace/anything"))
+
+
+def test_path_binding_allows_null_team_for_team_optional_verbs() -> None:
+    config = ProfileConfig(
+        profiles={"foundation": Profile(api_key="key")},
+        path_defaults={"/workspace/placeframe": PathBinding(profile="foundation", team=None)},
+    )
+    binding = resolve_path_binding(config, None, Path("/workspace/placeframe"))
+    assert binding.team is None
