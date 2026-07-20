@@ -10,3 +10,4 @@ dist/
 .ruff_cache
 .env
 config.json
+bookmark.md
