@@ -12,41 +12,34 @@ Requires Python 3.13+ and [uv](https://docs.astral.sh/uv/).
 uv sync
 ```
 
-Create `~/.config/linear-cli/config.json` with one block per Linear workspace (profile = API key only, since keys are workspace-scoped) plus a `path_defaults` map that routes each repo checkout to a profile and an optional team default:
+Create `~/.config/linear-cli/config.json` with one block per Linear workspace. Each profile carries the workspace's API key and the list of filesystem paths that route to it (paths are nested under profiles and flattened on load):
 
 ```json
 {
   "profiles": {
-    "foundation": { "api_key": "lin_api_..." },
-    "personal":   { "api_key": "lin_api_..." }
-  },
-  "path_defaults": {
-    "/workspace/placeframe": { "profile": "foundation", "team": "PLE" },
-    "/workspace/pulsar":     { "profile": "personal",   "team": "TYL" }
+    "foundation": {
+      "api_key": "lin_api_...",
+      "paths": ["/workspace/placeframe", "/workspace/governance", "/workspace/linear-cli"]
+    },
+    "personal": {
+      "api_key": "lin_api_...",
+      "paths": ["/workspace/pulsar"]
+    }
   }
 }
 ```
 
-Then `linear list-issues` from `/workspace/pulsar/` uses the personal profile and TYL team automatically; `--profile foundation` overrides per-call (clearing the team default — pass `--team` too if you need one). See [`design/multi-workspace-profiles.md`](./design/multi-workspace-profiles.md) for the full resolution rules.
+Then `linear --profile foundation list-issues --team PLE` works from anywhere; from `/workspace/pulsar/` the profile resolves automatically via the paths list, and only `--team TYL` is needed. `--team` is required on every team-scoped write — there is no path-level team default, because picking a team means picking a ticket lifecycle, and a single repo can produce tickets in multiple lifecycles. See [`design/multi-workspace-profiles.md`](./design/multi-workspace-profiles.md) for the full resolution rules.
 
 ## Usage
 
 ```bash
 uv run linear --help                 # list every verb
 uv run linear list-projects          # read verbs emit one JSON object per row on stdout
-uv run linear list-issues            # team defaults to the resolved path binding's team
-
-# write verbs take the markdown body on stdin and emit the created/updated ids as JSON
-uv run linear create-issue --title "Delete the pair-consistency gate" <<'EOF'
-**Why:** The gate rejects valid two-view pairs and blocks reconstruction.
-
-**Done when:** No pair-consistency check remains in the reconstructor.
-
-**Links:** [reconstructor/AGENTS.md](https://github.com/outernet-foundation/placeframe/blob/dev/docker/reconstructor/AGENTS.md)
-EOF
+uv run linear list-issues --team PLE # team is explicit; omit for workspace-wide
 ```
 
-`--team` defaults to the path binding's `team` field; pass it explicitly to override. `--profile` overrides the credential and clears the team default. `create-issue` and `update-issue` validate the title and body against the conventions before sending the mutation and refuse to write anything off-template. `uv run linear lint` audits already-created tickets after the fact.
+`--team` is required on team-scoped writes (`create-issue`, `create-project`, `create-workflow-state`, `list-workflow-states`), optional as a filter on `list-issues`/`list-relations`/`lint`, and used for cross-team moves on `update-issue`/`update-project`. `create-issue` and `update-issue` validate the title and body against the conventions before sending the mutation and refuse to write anything off-template. `uv run linear lint` audits already-created tickets after the fact.
 
 ## Global install (optional)
 
