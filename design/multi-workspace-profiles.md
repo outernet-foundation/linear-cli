@@ -8,17 +8,18 @@ Design rationale for the profile system that lets `linear-cli` write to multiple
 
 ## Config file
 
-Workspace facts and per-repo routing live in `~/.config/linear-cli/config.json`:
+Workspace credentials and per-repo routing live in `~/.config/linear-cli/config.json`:
 
 ```json
 {
   "profiles": {
-    "foundation": { "api_key": "lin_api_...", "team_key": "PLE" },
-    "personal":   { "api_key": "lin_api_...", "team_key": "TYL" }
+    "foundation": { "api_key": "lin_api_..." },
+    "personal":   { "api_key": "lin_api_..." }
   },
   "path_defaults": {
-    "/workspace/placeframe": "foundation",
-    "/workspace/pulsar": "personal"
+    "/workspace/placeframe": { "profile": "foundation", "team": "PLE" },
+    "/workspace/governance": { "profile": "foundation", "team": "GOV" },
+    "/workspace/pulsar":     { "profile": "personal",   "team": "TYL" }
   }
 }
 ```
@@ -29,9 +30,13 @@ Location: `~/.config/linear-cli/` (the `-cli` suffix disambiguates from any futu
 
 An earlier design proposed a `.linear-profile` marker file committed to each repo root (analogous to `.python-version` or `.nvmrc`). That couples the repo to a specific workspace — wrong layer. The same repo cloned by a different operator (or forked) would inherit a workspace routing decision that doesn't match their setup. Putting `path_defaults` in user-side config keeps the repo workspace-agnostic: each operator's machine decides which profile a checkout uses, and changing the routing is a local edit, not a commit.
 
-### Why team keys live in config, not introspected
+### Why profile holds only the API key, and team routes via path_defaults
 
-A team key is a user-routing fact, not workspace state. Linear exposes the list of teams in a workspace, but cannot tell you which one *this operator* means when writing tickets from *this repo* — that's a per-operator routing decision (foundation has one team today; a workspace with multiple teams would need to pick one per profile). Putting `team_key` in user config makes the choice explicit, profile-scoped, and overridable per-call via `--team`. The field is required on every profile because every Linear workspace has at least one team — Linear creates one on workspace setup, and every issue must belong to a team. An earlier draft allowed `team_key: null` for "team-less personal workspace," but that shape doesn't exist in Linear; nullability only created per-write friction (each write needed `--team` looked up out-of-band) for a hypothetical multi-team case that the `--team` override already handles.
+A Linear API key is scoped to a **workspace**, not a team. A workspace owns many teams; a key opens the workspace; which team a particular invocation is scoping to is a property of *where the operator is standing*, not of *which credential they hold*. The schema reflects that distinction: `Profile` carries only `api_key`, and the team default lives on the path binding paired with that profile.
+
+An earlier draft put `team_key` directly on `Profile`. That shape assumed one team per workspace, so the profile → team mapping was 1:1 and the conflation was invisible. The assumption broke the moment a second team (`GOV`) was added to the foundation workspace: creating a "governance profile" meant duplicating the foundation API key into a new profile entry, which is the smell that surfaced the design weakness. Secret duplication is a maintenance liability (rotation becomes N edits) and a security smell (more places to leak from); the architecturally correct fix is to lift team routing one level, out of the credential and into the path binding where it belongs.
+
+Team routing is a per-operator, per-checkout decision — Linear exposes the list of teams in a workspace, but cannot tell you which one *this operator* means when writing tickets from *this repo*. Putting `team` on the path binding makes the choice explicit, path-scoped, and overridable per-call via `--team`. The field is optional on a binding: verbs where team is structurally required (`create-issue`, `create-project`, `update-issue --state`, etc.) error with a clear message if no team resolves; verbs where team is a filter (`list-issues`, `lint`) treat a missing team as workspace-wide.
 
 Label taxonomy, by contrast, is workspace state — Linear owns it, exposes it via `list-labels`, and any local mirror goes stale the moment a label is added or renamed in the web UI. The config schema does not carry labels; agents and humans call `list-labels` for the authoritative current tree.
 
@@ -39,9 +44,9 @@ Label taxonomy, by contrast, is workspace state — Linear owns it, exposes it v
 
 Order:
 
-1. `--profile <name>` global flag → use that profile (errors if the name isn't in `profiles`)
-2. Longest-prefix match on `path_defaults` against the resolved CWD → use the matching profile
-3. Hard error: `no profile resolved for <cwd>; pass --profile or add a path_defaults entry`
+1. `--profile <name>` global flag → returns a synthetic binding with that profile and `team=null`. The path's team default does not carry across, because the team was paired with a different profile in the config — the operator is explicitly swapping credentials, so the prior team routing is void. Pass `--team` to set one. Errors if the name isn't in `profiles`.
+2. Longest-prefix match on `path_defaults` against the resolved CWD → use the matching binding (profile + team together).
+3. Hard error: `no path binding for <cwd>; pass --profile or add a path_defaults entry`.
 
 ### Longest-prefix match
 
@@ -55,7 +60,7 @@ A `default_profile` field was considered and rejected. The only case it would fi
 
 ## Team behavior
 
-A profile's `team_key` provides the default for every team-scoped verb (`list-issues`, `list-relations`, `lint`, `create-issue`, `create-project`, `update-issue`'s `--state` resolution). `--team` overrides it for writes to other teams in the same workspace.
+A path binding's `team` field provides the default for every team-scoped verb (`list-issues`, `list-relations`, `lint`, `create-issue`, `create-project`, `update-issue`'s `--state` resolution, `create-workflow-state`, `list-workflow-states`). `--team` overrides it — for writes to other teams in the same workspace, or to repair a path whose binding omits `team`.
 
 ## Why not one env var per workspace
 

@@ -12,29 +12,29 @@ Requires Python 3.13+ and [uv](https://docs.astral.sh/uv/).
 uv sync
 ```
 
-Create `~/.config/linear-cli/config.json` with one block per Linear workspace plus a `path_defaults` map that routes each repo checkout to a profile:
+Create `~/.config/linear-cli/config.json` with one block per Linear workspace (profile = API key only, since keys are workspace-scoped) plus a `path_defaults` map that routes each repo checkout to a profile and an optional team default:
 
 ```json
 {
   "profiles": {
-    "foundation": { "api_key": "lin_api_...", "team_key": "PLE", "labels": {} },
-    "personal":   { "api_key": "lin_api_...", "team_key": null,  "labels": {} }
+    "foundation": { "api_key": "lin_api_..." },
+    "personal":   { "api_key": "lin_api_..." }
   },
   "path_defaults": {
-    "/workspace/placeframe": "foundation",
-    "/workspace/pulsar":     "personal"
+    "/workspace/placeframe": { "profile": "foundation", "team": "PLE" },
+    "/workspace/pulsar":     { "profile": "personal",   "team": "TYL" }
   }
 }
 ```
 
-Then `linear list-issues` from `/workspace/pulsar/` uses the personal profile automatically; `--profile foundation` overrides per-call. See [`design/multi-workspace-profiles.md`](./design/multi-workspace-profiles.md) for the full resolution rules.
+Then `linear list-issues` from `/workspace/pulsar/` uses the personal profile and TYL team automatically; `--profile foundation` overrides per-call (clearing the team default — pass `--team` too if you need one). See [`design/multi-workspace-profiles.md`](./design/multi-workspace-profiles.md) for the full resolution rules.
 
 ## Usage
 
 ```bash
 uv run linear --help                 # list every verb
 uv run linear list-projects          # read verbs emit one JSON object per row on stdout
-uv run linear list-issues            # team defaults to the resolved profile's team_key
+uv run linear list-issues            # team defaults to the resolved path binding's team
 
 # write verbs take the markdown body on stdin and emit the created/updated ids as JSON
 uv run linear create-issue --title "Delete the pair-consistency gate" <<'EOF'
@@ -46,7 +46,7 @@ uv run linear create-issue --title "Delete the pair-consistency gate" <<'EOF'
 EOF
 ```
 
-`--team` defaults to the resolved profile's `team_key`; pass it explicitly to override. `create-issue` and `update-issue` validate the title and body against the conventions before sending the mutation and refuse to write anything off-template. `uv run linear lint` audits already-created tickets after the fact.
+`--team` defaults to the path binding's `team` field; pass it explicitly to override. `--profile` overrides the credential and clears the team default. `create-issue` and `update-issue` validate the title and body against the conventions before sending the mutation and refuse to write anything off-template. `uv run linear lint` audits already-created tickets after the fact.
 
 ## Global install (optional)
 
