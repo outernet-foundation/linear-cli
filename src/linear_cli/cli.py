@@ -349,8 +349,12 @@ def root_callback(
 @app.command(name="list-issues")
 def list_issues(
     team: Annotated[str | None, typer.Option("--team", help="Team key to filter by, e.g. PLE")] = None,
+    label: Annotated[str | None, typer.Option("--label", help="Label name to filter by")] = None,
 ) -> None:
-    for issue in _paginate("Issues", {"filter": _team_filter(team)}, IssuesData, lambda data: data.issues):
+    filter_dict: dict[str, object] = _team_filter(team)
+    if label is not None:
+        filter_dict["labels"] = {"name": {"eq": label}}
+    for issue in _paginate("Issues", {"filter": filter_dict}, IssuesData, lambda data: data.issues):
         _emit({
             "id": issue.id,
             "identifier": issue.identifier,
@@ -662,6 +666,7 @@ def create_issue(
     team: Annotated[str, typer.Option("--team", help="Team key, e.g. PLE")],
     project: Annotated[str | None, typer.Option("--project", help="Project id to file the issue under")] = None,
     label: Annotated[list[str] | None, typer.Option("--label", help="Label id to attach (repeatable)")] = None,
+    priority: Annotated[int | None, typer.Option("--priority", help="Issue priority: 0=none, 1=urgent, 2=high")] = None,
 ) -> None:
     description = _read_stdin()
     _enforce_conventions(title, description)
@@ -672,6 +677,8 @@ def create_issue(
         fields["projectId"] = project
     if label:
         fields["labelIds"] = label
+    if priority is not None:
+        fields["priority"] = priority
 
     payload = graphql("CreateIssue", {"input": fields}, IssueCreateData).issue_create
     issue = _require(payload.success, payload.issue, f"Failed to create issue {title!r}")
@@ -692,6 +699,7 @@ def update_issue(
         str | None,
         typer.Option("--team", help="Team key to move the issue to (also used for state resolution), e.g. GOV"),
     ] = None,
+    priority: Annotated[int | None, typer.Option("--priority", help="Issue priority: 0=none, 1=urgent, 2=high")] = None,
 ) -> None:
     description = _read_stdin()
     _enforce_conventions(title, description if description.strip() else None)
@@ -719,7 +727,10 @@ def update_issue(
 
         fields["stateId"] = matches[0].id
 
-    _require_fields(fields, "Nothing to update; pass --team, --title, --label, --state, or a body on stdin")
+    if priority is not None:
+        fields["priority"] = priority
+
+    _require_fields(fields, "Nothing to update; pass --team, --title, --label, --state, --priority, or a body on stdin")
 
     payload = graphql("UpdateIssue", {"id": issue_id, "input": fields}, IssueUpdateData).issue_update
     issue = _require(payload.success, payload.issue, f"Failed to update issue {issue_id!r}")
