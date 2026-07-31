@@ -75,6 +75,7 @@ class IssueListNode(_Model):
     description: str | None = None
     url: str
     created_at: str = Field(alias="createdAt")
+    archived_at: str | None = Field(default=None, alias="archivedAt")
     state: IssueStateNode
     labels: _NodeList[IssueLabelName]
     project: ProjectRef | None = None
@@ -94,7 +95,9 @@ class IssueDetailNode(_Model):
     description: str | None = None
     url: str
     created_at: str = Field(alias="createdAt")
+    archived_at: str | None = Field(default=None, alias="archivedAt")
     state: IssueStateNode
+    team: TeamNode | None = None
     project: ProjectRef | None = None
     attachments: _NodeList[AttachmentNode]
 
@@ -333,6 +336,14 @@ class CommentDeleteData(_Model):
     comment_delete: CommentDeletePayload = Field(alias="commentDelete")
 
 
+class IssueUnarchivePayload(_Model):
+    success: bool
+
+
+class IssueUnarchiveData(_Model):
+    issue_unarchive: IssueUnarchivePayload = Field(alias="issueUnarchive")
+
+
 app = typer.Typer(add_completion=False, pretty_exceptions_show_locals=False)
 
 
@@ -350,11 +361,17 @@ def root_callback(
 def list_issues(
     team: Annotated[str | None, typer.Option("--team", help="Team key to filter by, e.g. PLE")] = None,
     label: Annotated[str | None, typer.Option("--label", help="Label name to filter by")] = None,
+    include_archived: Annotated[
+        bool, typer.Option("--include-archived", help="Include archived issues in results")
+    ] = False,
 ) -> None:
     filter_dict: dict[str, object] = _team_filter(team)
     if label is not None:
         filter_dict["labels"] = {"name": {"eq": label}}
-    for issue in _paginate("Issues", {"filter": filter_dict}, IssuesData, lambda data: data.issues):
+    variables: dict[str, object] = {"filter": filter_dict}
+    if include_archived:
+        variables["includeArchived"] = True
+    for issue in _paginate("Issues", variables, IssuesData, lambda data: data.issues):
         _emit({
             "id": issue.id,
             "identifier": issue.identifier,
@@ -364,6 +381,7 @@ def list_issues(
             "labels": [label.name for label in issue.labels.nodes],
             "project": issue.project.name if issue.project else None,
             "created_at": issue.created_at,
+            "archived_at": issue.archived_at,
             "url": issue.url,
         })
 
@@ -377,8 +395,10 @@ def get_issue(
         "identifier": issue.identifier,
         "title": issue.title,
         "state": issue.state.name,
+        "team": issue.team.key if issue.team else None,
         "project": issue.project.name if issue.project else None,
         "created_at": issue.created_at,
+        "archived_at": issue.archived_at,
         "url": issue.url,
         "description": issue.description,
         "attachments": [
@@ -769,6 +789,15 @@ def delete_comment(
     payload = graphql("DeleteComment", {"id": comment_id}, CommentDeleteData).comment_delete
     _require_ok(payload.success, f"Failed to delete comment {comment_id!r}")
     _emit({"id": comment_id, "deleted": True})
+
+
+@app.command(name="unarchive-issue")
+def unarchive_issue(
+    issue_id: Annotated[str, typer.Option("--id", help="Issue id or identifier to unarchive")],
+) -> None:
+    payload = graphql("IssueUnarchive", {"id": issue_id}, IssueUnarchiveData).issue_unarchive
+    _require_ok(payload.success, f"Failed to unarchive issue {issue_id!r}")
+    _emit({"id": issue_id, "unarchived": True})
 
 
 def _paginate[T: _Model, NodeT](

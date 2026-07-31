@@ -8,8 +8,8 @@ query Teams {
   }
 }
 
-query Issues($filter: IssueFilter, $after: String) {
-  issues(first: 250, filter: $filter, after: $after) {
+query Issues($filter: IssueFilter, $after: String, $includeArchived: Boolean) {
+  issues(first: 250, filter: $filter, after: $after, includeArchived: $includeArchived) {
     pageInfo {
       hasNextPage
       endCursor
@@ -21,6 +21,7 @@ query Issues($filter: IssueFilter, $after: String) {
       description
       url
       createdAt
+      archivedAt
       state {
         name
         type
@@ -125,9 +126,15 @@ query Issue($id: String!) {
     description
     url
     createdAt
+    archivedAt
     state {
       name
       type
+    }
+    team {
+      id
+      key
+      name
     }
     project {
       id
@@ -304,6 +311,12 @@ mutation CreateComment($input: CommentCreateInput!) {
 
 mutation DeleteComment($id: String!) {
   commentDelete(id: $id) {
+    success
+  }
+}
+
+mutation IssueUnarchive($id: String!) {
+  issueUnarchive(id: $id) {
     success
   }
 }
