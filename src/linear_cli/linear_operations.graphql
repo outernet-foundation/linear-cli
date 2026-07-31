@@ -59,8 +59,8 @@ query IssueRelations($filter: IssueFilter, $after: String) {
   }
 }
 
-query IssueSnapshot($filter: IssueFilter, $after: String) {
-  issues(first: 250, filter: $filter, after: $after) {
+query IssueSnapshot($filter: IssueFilter, $after: String, $includeArchived: Boolean) {
+  issues(first: 250, filter: $filter, after: $after, includeArchived: $includeArchived) {
     pageInfo {
       hasNextPage
       endCursor
@@ -70,9 +70,20 @@ query IssueSnapshot($filter: IssueFilter, $after: String) {
       identifier
       title
       description
+      priority
+      archivedAt
       state {
         name
         type
+      }
+      team {
+        id
+        key
+        name
+      }
+      project {
+        id
+        name
       }
       labels {
         nodes {
@@ -98,9 +109,20 @@ query IssueSnapshotById($id: String!) {
     identifier
     title
     description
+    priority
+    archivedAt
     state {
       name
       type
+    }
+    team {
+      id
+      key
+      name
+    }
+    project {
+      id
+      name
     }
     labels {
       nodes {

@@ -138,7 +138,11 @@ class IssueSnapshotNode(_Model):
     identifier: str
     title: str
     description: str | None = None
+    priority: int = 0
+    archived_at: str | None = Field(default=None, alias="archivedAt")
     state: IssueStateNode
+    team: TeamNode | None = None
+    project: ProjectRef | None = None
     labels: _NodeList[IssueLabelName]
     comments: _NodeList[IssueSnapshotCommentNode]
 
@@ -524,6 +528,51 @@ def snapshot(
     typer.echo(json.dumps(record, indent=2))
 
 
+@app.command(name="snapshot-workspace")
+def snapshot_workspace() -> None:
+    captured_at = datetime.now(UTC).isoformat()
+    profile_name = _resolved_profile_name()
+
+    teams = graphql("Teams", {}, TeamsData).teams.nodes
+    projects = list(_paginate("Projects", {}, ProjectsData, lambda data: data.projects))
+    labels = graphql("Labels", {}, LabelsData).issue_labels.nodes
+    workflow_states = graphql("WorkflowStates", {"filter": {}}, WorkflowStatesData).workflow_states.nodes
+    issues = list(
+        _paginate(
+            "IssueSnapshot", {"includeArchived": True}, IssueSnapshotData, lambda data: data.issues
+        )
+    )
+
+    record = {
+        "captured_at": captured_at,
+        "linear_profile": profile_name,
+        "teams": [{"id": team.id, "key": team.key, "name": team.name} for team in teams],
+        "workflow_states": [
+            {"id": state.id, "name": state.name, "type": state.type}
+            for state in workflow_states
+        ],
+        "projects": [
+            {"id": project.id, "name": project.name, "state": project.state, "url": project.url}
+            for project in projects
+        ],
+        "labels": [
+            {
+                "id": label.id,
+                "name": label.name,
+                "color": label.color,
+                "is_group": label.is_group,
+                "parent_id": label.parent.id if label.parent else None,
+            }
+            for label in labels
+        ],
+        "issues": [
+            _snapshot_issue_dict(node)
+            for node in sorted(issues, key=lambda node: identifier_sort_key(node.identifier))
+        ],
+    }
+    typer.echo(json.dumps(record, indent=2))
+
+
 @app.command(name="lint")
 def lint(
     team: Annotated[str | None, typer.Option("--team", help="Team key to filter by, e.g. PLE")] = None,
@@ -843,6 +892,11 @@ def _snapshot_issue_dict(node: IssueSnapshotNode) -> dict[str, object]:
         "title": node.title,
         "description": node.description,
         "state": node.state.name,
+        "state_type": node.state.type,
+        "team": node.team.key if node.team else None,
+        "project": node.project.name if node.project else None,
+        "priority": node.priority,
+        "archived_at": node.archived_at,
         "labels": [label.name for label in node.labels.nodes],
         "comments": [_snapshot_comment_dict(comment) for comment in node.comments.nodes],
     }
