@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import linear_cli.cli as cli_module
-from linear_cli.cli import (
+from linear_cli.models import (
     CreatedTeam,
     CreatedWorkflowState,
     TeamCreateData,

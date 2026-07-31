@@ -12,8 +12,41 @@ from typing import Annotated, NoReturn
 import httpx
 import typer
 from bashrun import bash_check, bash_output
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import ValidationError
 
+from .models import (
+    CommentCreateData,
+    CommentDeleteData,
+    IssueCreateData,
+    IssueDetailData,
+    IssueLabelCreateData,
+    IssueLabelDeleteData,
+    IssueLabelUpdateData,
+    IssueListNode,
+    IssueRelationCreateData,
+    IssueRelationsData,
+    IssueSnapshotByIdData,
+    IssueSnapshotData,
+    IssueSnapshotNode,
+    IssueUnarchiveData,
+    IssueUpdateData,
+    IssuesData,
+    LabelNode,
+    LabelsData,
+    ProjectCreateData,
+    ProjectDeleteData,
+    ProjectUpdateData,
+    ProjectsData,
+    ResponsePayload,
+    TeamCreateData,
+    TeamUpdateData,
+    TeamsData,
+    WorkflowStateArchiveData,
+    WorkflowStateCreateData,
+    WorkflowStatesData,
+    Connection,
+    LinearModel,
+)
 from .profiles import (
     CONFIG_PATH,
     ProfileConfig,
@@ -30,315 +63,8 @@ _OPERATIONS = Path(__file__).with_name(OPERATIONS_DOCUMENT).read_text(encoding="
 app = typer.Typer(add_completion=False, pretty_exceptions_show_locals=False)
 
 
-class _Model(BaseModel):
-    model_config = ConfigDict(populate_by_name=True)
-
-
 class _CliState:
     profile_override: str | None = None
-
-
-class PageInfo(_Model):
-    has_next_page: bool = Field(alias="hasNextPage")
-    end_cursor: str | None = Field(default=None, alias="endCursor")
-
-
-class _Connection[NodeT](_Model):
-    page_info: PageInfo = Field(alias="pageInfo")
-    nodes: list[NodeT]
-
-
-class _NodeList[NodeT](_Model):
-    nodes: list[NodeT]
-
-
-class TeamNode(_Model):
-    id: str
-    key: str
-    name: str
-
-
-class IssueStateNode(_Model):
-    name: str
-    type: str
-
-
-class IssueLabelName(_Model):
-    name: str
-
-
-class ProjectRef(_Model):
-    id: str
-    name: str
-
-
-class IssueListNode(_Model):
-    id: str
-    identifier: str
-    title: str
-    description: str | None = None
-    url: str
-    created_at: str = Field(alias="createdAt")
-    archived_at: str | None = Field(default=None, alias="archivedAt")
-    state: IssueStateNode
-    labels: _NodeList[IssueLabelName]
-    project: ProjectRef | None = None
-
-
-class AttachmentNode(_Model):
-    id: str
-    title: str | None = None
-    subtitle: str | None = None
-    url: str
-    metadata: dict[str, object] | None = None
-
-
-class LabelIdRef(_Model):
-    id: str
-
-
-class IssueDetailNode(_Model):
-    identifier: str
-    title: str
-    description: str | None = None
-    url: str
-    created_at: str = Field(alias="createdAt")
-    archived_at: str | None = Field(default=None, alias="archivedAt")
-    state: IssueStateNode
-    team: TeamNode | None = None
-    project: ProjectRef | None = None
-    labels: _NodeList[LabelIdRef] = Field(default_factory=lambda: _NodeList(nodes=[]))
-    attachments: _NodeList[AttachmentNode]
-
-
-class ProjectListNode(_Model):
-    id: str
-    name: str
-    url: str
-    state: str
-
-
-class RelatedIssueNode(_Model):
-    identifier: str
-
-
-class IssueRelationNode(_Model):
-    type: str
-    related_issue: RelatedIssueNode | None = Field(default=None, alias="relatedIssue")
-
-
-class IssueRelationsNode(_Model):
-    identifier: str
-    relations: _NodeList[IssueRelationNode]
-
-
-class CommentUserNode(_Model):
-    name: str
-
-
-class IssueSnapshotCommentNode(_Model):
-    body: str | None = None
-    created_at: str = Field(alias="createdAt")
-    user: CommentUserNode | None = None
-
-
-class IssueSnapshotNode(_Model):
-    id: str
-    identifier: str
-    title: str
-    description: str | None = None
-    priority: int = 0
-    archived_at: str | None = Field(default=None, alias="archivedAt")
-    state: IssueStateNode
-    team: TeamNode | None = None
-    project: ProjectRef | None = None
-    labels: _NodeList[IssueLabelName]
-    comments: _NodeList[IssueSnapshotCommentNode]
-
-
-class WorkflowStateNode(_Model):
-    id: str
-    name: str
-    type: str
-
-
-class LabelParent(_Model):
-    id: str
-
-
-class LabelNode(_Model):
-    id: str
-    name: str
-    color: str | None = None
-    is_group: bool = Field(default=False, alias="isGroup")
-    parent: LabelParent | None = None
-
-
-class CreatedLabel(_Model):
-    id: str
-    name: str
-
-
-class CreatedProject(_Model):
-    id: str
-    url: str
-
-
-class CreatedTeam(_Model):
-    id: str
-    key: str
-    name: str
-
-
-class CreatedWorkflowState(_Model):
-    id: str
-    name: str
-    type: str
-
-
-class CreatedIssue(_Model):
-    id: str
-    identifier: str
-    url: str
-
-
-class CommentNode(_Model):
-    id: str
-    url: str
-
-
-class SuccessPayload(_Model):
-    success: bool
-
-
-class IssueLabelMutationPayload(_Model):
-    success: bool
-    issue_label: CreatedLabel | None = Field(default=None, alias="issueLabel")
-
-
-class ProjectMutationPayload(_Model):
-    success: bool
-    project: CreatedProject | None = None
-
-
-class TeamMutationPayload(_Model):
-    success: bool
-    team: CreatedTeam | None = None
-
-
-class WorkflowStateMutationPayload(_Model):
-    success: bool
-    workflow_state: CreatedWorkflowState | None = Field(default=None, alias="workflowState")
-
-
-class IssueMutationPayload(_Model):
-    success: bool
-    issue: CreatedIssue | None = None
-
-
-class CommentCreatePayload(_Model):
-    success: bool
-    comment: CommentNode | None = None
-
-
-class TeamsData(_Model):
-    teams: _NodeList[TeamNode]
-
-
-class IssuesData(_Model):
-    issues: _Connection[IssueListNode]
-
-
-class IssueDetailData(_Model):
-    issue: IssueDetailNode
-
-
-class ProjectsData(_Model):
-    projects: _Connection[ProjectListNode]
-
-
-class IssueRelationsData(_Model):
-    issues: _Connection[IssueRelationsNode]
-
-
-class IssueSnapshotData(_Model):
-    issues: _Connection[IssueSnapshotNode]
-
-
-class IssueSnapshotByIdData(_Model):
-    issue: IssueSnapshotNode
-
-
-class WorkflowStatesData(_Model):
-    workflow_states: _NodeList[WorkflowStateNode] = Field(alias="workflowStates")
-
-
-class LabelsData(_Model):
-    issue_labels: _NodeList[LabelNode] = Field(alias="issueLabels")
-
-
-class IssueLabelCreateData(_Model):
-    issue_label_create: IssueLabelMutationPayload = Field(alias="issueLabelCreate")
-
-
-class IssueLabelUpdateData(_Model):
-    issue_label_update: IssueLabelMutationPayload = Field(alias="issueLabelUpdate")
-
-
-class IssueLabelDeleteData(_Model):
-    issue_label_delete: SuccessPayload = Field(alias="issueLabelDelete")
-
-
-class ProjectCreateData(_Model):
-    project_create: ProjectMutationPayload = Field(alias="projectCreate")
-
-
-class TeamCreateData(_Model):
-    team_create: TeamMutationPayload = Field(alias="teamCreate")
-
-
-class TeamUpdateData(_Model):
-    team_update: TeamMutationPayload = Field(alias="teamUpdate")
-
-
-class WorkflowStateCreateData(_Model):
-    workflow_state_create: WorkflowStateMutationPayload = Field(alias="workflowStateCreate")
-
-
-class WorkflowStateArchiveData(_Model):
-    workflow_state_archive: SuccessPayload = Field(alias="workflowStateArchive")
-
-
-class ProjectUpdateData(_Model):
-    project_update: ProjectMutationPayload = Field(alias="projectUpdate")
-
-
-class ProjectDeleteData(_Model):
-    project_delete: SuccessPayload = Field(alias="projectDelete")
-
-
-class IssueCreateData(_Model):
-    issue_create: IssueMutationPayload = Field(alias="issueCreate")
-
-
-class IssueUpdateData(_Model):
-    issue_update: IssueMutationPayload = Field(alias="issueUpdate")
-
-
-class IssueRelationCreateData(_Model):
-    issue_relation_create: SuccessPayload = Field(alias="issueRelationCreate")
-
-
-class CommentCreateData(_Model):
-    comment_create: CommentCreatePayload = Field(alias="commentCreate")
-
-
-class CommentDeleteData(_Model):
-    comment_delete: SuccessPayload = Field(alias="commentDelete")
-
-
-class IssueUnarchiveData(_Model):
-    issue_unarchive: SuccessPayload = Field(alias="issueUnarchive")
 
 
 @app.callback()
@@ -940,7 +666,7 @@ def _resolved_profile_name() -> str:
     return resolve_profile_name(_load_config_or_die(), _CliState.profile_override, Path.cwd())
 
 
-def graphql[T: _Model](operation: str, variables: dict[str, object], model: type[T]) -> T:
+def graphql[T: LinearModel](operation: str, variables: dict[str, object], model: type[T]) -> T:
     response = httpx.post(
         LINEAR_ENDPOINT,
         headers={
@@ -951,9 +677,9 @@ def graphql[T: _Model](operation: str, variables: dict[str, object], model: type
         timeout=30.0,
     )
     try:
-        payload: dict[str, object] = response.json()
-    except json.JSONDecodeError:
-        _fail(f"Linear API returned a non-JSON response (HTTP {response.status_code}): {response.text[:200]}")
+        payload = ResponsePayload.model_validate_json(response.content).root
+    except ValidationError:
+        _fail(f"Linear API returned a malformed response (HTTP {response.status_code}): {response.text[:200]}")
 
     errors = payload.get("errors")
     if errors:
@@ -966,11 +692,11 @@ def graphql[T: _Model](operation: str, variables: dict[str, object], model: type
     return model.model_validate(data)
 
 
-def _paginate[T: _Model, NodeT](
+def _paginate[T: LinearModel, NodeT](
     operation: str,
     variables: dict[str, object],
     model: type[T],
-    select: Callable[[T], _Connection[NodeT]],
+    select: Callable[[T], Connection[NodeT]],
 ) -> Iterator[NodeT]:
     after: str | None = None
     while True:

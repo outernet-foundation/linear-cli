@@ -91,7 +91,10 @@ def validate_body(body: str) -> list[str]:
 
 def _validate_link_targets(body: str) -> list[str]:
     violations: list[str] = []
-    for target in _LINK_TARGET.findall(body):
+    for match in _LINK_TARGET.finditer(body):
+        target = match.group(1)
+        if target is None:
+            continue
         parsed = urlparse(target)
         hostname = parsed.hostname or ""
         if parsed.scheme not in ("http", "https"):
