@@ -300,6 +300,10 @@ class TeamCreateData(_Model):
     team_create: TeamMutationPayload = Field(alias="teamCreate")
 
 
+class TeamUpdateData(_Model):
+    team_update: TeamMutationPayload = Field(alias="teamUpdate")
+
+
 class WorkflowStateCreateData(_Model):
     workflow_state_create: WorkflowStateMutationPayload = Field(alias="workflowStateCreate")
 
@@ -465,6 +469,25 @@ def create_team(
 
     payload = graphql("CreateTeam", {"input": fields}, TeamCreateData).team_create
     team = _require(payload.success, payload.team, f"Failed to create team {name!r}")
+    _emit({"id": team.id, "key": team.key, "name": team.name})
+
+
+@app.command(name="update-team")
+def update_team(
+    team_id: Annotated[str, typer.Option("--id", help="Team id to update")],
+    name: Annotated[str | None, typer.Option("--name", help="New team display name")] = None,
+    description: Annotated[str | None, typer.Option("--description", help="New team description")] = None,
+) -> None:
+    fields: dict[str, object] = {}
+    if name is not None:
+        fields["name"] = name
+    if description is not None:
+        fields["description"] = description
+
+    _require_fields(fields, "Nothing to update; pass --name and/or --description")
+
+    payload = graphql("UpdateTeam", {"id": team_id, "input": fields}, TeamUpdateData).team_update
+    team = _require(payload.success, payload.team, f"Failed to update team {team_id!r}")
     _emit({"id": team.id, "key": team.key, "name": team.name})
 
 

@@ -210,6 +210,17 @@ mutation CreateTeam($input: TeamCreateInput!) {
   }
 }
 
+mutation UpdateTeam($id: String!, $input: TeamUpdateInput!) {
+  teamUpdate(id: $id, input: $input) {
+    success
+    team {
+      id
+      key
+      name
+    }
+  }
+}
+
 mutation CreateWorkflowState($input: WorkflowStateCreateInput!) {
   workflowStateCreate(input: $input) {
     success
