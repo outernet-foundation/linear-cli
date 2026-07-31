@@ -1,23 +1,31 @@
 from __future__ import annotations
 
+import json
 import re
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
 
 import typer
 from bashrun import bash_check, bash_output
 
-from .client import CliState, emit, fail, graphql, mutate, paginate, team_filter
-from .commands.comment import comment_app
-from .commands.issue import issue_app
-from .commands.label import label_app
-from .commands.project import project_app
-from .commands.relation import relation_app
-from .commands.team import team_app
-from .commands.workflow_state import workflow_state_app
-from .commands.workspace import workspace_app
-from .models import IssueListNode, IssuesData, LabelsData
-from .operations import ISSUE_LIST_FIELDS, LABEL_FIELDS, build_list_query
+from .api import CliState, build_list_query, emit, fail, graphql, mutate, paginate, resolved_profile_name, team_filter
+from .nouns.comment import comment_app
+from .nouns.issue import (
+    ISSUE_LIST_FIELDS,
+    ISSUE_SNAPSHOT_FIELDS,
+    IssueListNode,
+    IssueSnapshotData,
+    IssuesData,
+    issue_app,
+    identifier_sort_key,
+    snapshot_issue_dict,
+)
+from .nouns.label import LABEL_FIELDS, LabelsData, label_app
+from .nouns.project import PROJECT_FIELDS, ProjectsData, project_app
+from .nouns.relation import relation_app
+from .nouns.team import TEAM_FIELDS, TeamsData, team_app
+from .nouns.workflow_state import WORKFLOW_STATE_FIELDS, WorkflowStatesData, workflow_state_app
 from .validation import fix_bare_paths, orphan_design_docs, validate_body, validate_label_presence, validate_title
 
 app = typer.Typer(add_completion=False, pretty_exceptions_show_locals=False)
@@ -29,7 +37,6 @@ app.add_typer(workflow_state_app, name="workflow-state")
 app.add_typer(label_app, name="label")
 app.add_typer(relation_app, name="relation")
 app.add_typer(comment_app, name="comment")
-app.add_typer(workspace_app, name="workspace")
 
 
 @app.callback()
@@ -126,6 +133,53 @@ def find_references(
         for issue in paginate(query, {}, IssuesData, lambda data: data.issues):
             if boundary.search(issue.description or "") or boundary.search(issue.title):
                 emit({"source": issue.identifier, "line": 0, "context": "ticket body"})
+
+
+@app.command()
+def snapshot() -> None:
+    captured_at = datetime.now(UTC).isoformat()
+    profile_name = resolved_profile_name()
+
+    teams_query = build_list_query("teams", TEAM_FIELDS)
+    teams = TeamsData.model_validate(graphql(teams_query, {})).teams.nodes
+
+    projects_query = build_list_query("projects", PROJECT_FIELDS, paginated=True)
+    projects = list(paginate(projects_query, {}, ProjectsData, lambda data: data.projects))
+
+    labels_query = build_list_query("issueLabels", LABEL_FIELDS)
+    labels = LabelsData.model_validate(graphql(labels_query, {})).issue_labels.nodes
+
+    states_query = build_list_query("workflowStates", WORKFLOW_STATE_FIELDS, filter_type="WorkflowStateFilter")
+    workflow_states = WorkflowStatesData.model_validate(graphql(states_query, {"filter": {}})).workflow_states.nodes
+
+    issues_query = build_list_query(
+        "issues", ISSUE_SNAPSHOT_FIELDS, filter_type="IssueFilter", paginated=True, archive_aware=True
+    )
+    issues = list(paginate(issues_query, {"includeArchived": True}, IssueSnapshotData, lambda data: data.issues))
+
+    record = {
+        "captured_at": captured_at,
+        "linear_profile": profile_name,
+        "teams": [{"id": team.id, "key": team.key, "name": team.name} for team in teams],
+        "workflow_states": [{"id": state.id, "name": state.name, "type": state.type} for state in workflow_states],
+        "projects": [
+            {"id": project.id, "name": project.name, "state": project.state, "url": project.url} for project in projects
+        ],
+        "labels": [
+            {
+                "id": label.id,
+                "name": label.name,
+                "color": label.color,
+                "is_group": label.is_group,
+                "parent_id": label.parent.id if label.parent else None,
+            }
+            for label in labels
+        ],
+        "issues": [
+            snapshot_issue_dict(node) for node in sorted(issues, key=lambda node: identifier_sort_key(node.identifier))
+        ],
+    }
+    typer.echo(json.dumps(record, indent=2))
 
 
 def _lint_issue(

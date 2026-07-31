@@ -4,11 +4,31 @@ from typing import Annotated
 
 import typer
 
-from ..client import emit, graphql, mutate, require_fields
-from ..models import TeamsData
-from ..operations import TEAM_FIELDS, build_list_query
+from ..api import build_list_query, emit, fail, graphql, mutate, require_fields
+from ..models import LinearModel, NodeList
 
+TEAM_FIELDS = "id key name"
 team_app = typer.Typer()
+
+
+class TeamNode(LinearModel):
+    id: str
+    key: str
+    name: str
+
+
+class TeamsData(LinearModel):
+    teams: NodeList[TeamNode]
+
+
+def resolve_team_id(key: str) -> str:
+    query = build_list_query("teams", TEAM_FIELDS)
+    teams = TeamsData.model_validate(graphql(query, {})).teams.nodes
+    team = next((team for team in teams if team.key == key), None)
+    if team is None:
+        available = ", ".join(sorted(team.key for team in teams))
+        fail(f"No team with key {key!r}; available keys: {available}")
+    return team.id
 
 
 @team_app.command(name="list")

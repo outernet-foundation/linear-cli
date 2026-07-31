@@ -3,12 +3,45 @@ from __future__ import annotations
 from typing import Annotated
 
 import typer
+from pydantic import Field
 
-from ..client import emit, fail, graphql, mutate, require_fields
-from ..models import LabelNode, LabelsData
-from ..operations import LABEL_FIELDS, build_list_query
+from ..api import build_list_query, emit, fail, graphql, mutate, require_fields
+from ..models import LinearModel, NodeList
 
+LABEL_FIELDS = "id name color isGroup parent { id }"
 label_app = typer.Typer()
+
+
+class LabelParent(LinearModel):
+    id: str
+
+
+class LabelNode(LinearModel):
+    id: str
+    name: str
+    color: str | None = None
+    is_group: bool = Field(default=False, alias="isGroup")
+    parent: LabelParent | None = None
+
+
+class LabelsData(LinearModel):
+    issue_labels: NodeList[LabelNode] = Field(alias="issueLabels")
+
+
+def resolve_label_ids(labels: list[str]) -> list[str]:
+    query = build_list_query("issueLabels", LABEL_FIELDS)
+    all_labels = LabelsData.model_validate(graphql(query, {})).issue_labels.nodes
+    name_to_id = {label.name: label.id for label in all_labels}
+    resolved: list[str] = []
+    for label in labels:
+        if label in name_to_id:
+            resolved.append(name_to_id[label])
+        elif len(label) == 36 and label.count("-") == 4:
+            resolved.append(label)
+        else:
+            available = ", ".join(sorted(name_to_id))
+            fail(f"Unknown label {label!r}; available names: {available}")
+    return resolved
 
 
 def _ensure_label_record(labels: list[LabelNode], name: str, parent_id: str | None, is_group: bool) -> str:

@@ -4,11 +4,23 @@ from typing import Annotated
 
 import typer
 
-from ..client import emit, fail, mutate, paginate, read_stdin, require_fields, resolve_team_id
-from ..models import ProjectsData
-from ..operations import PROJECT_FIELDS, build_list_query
+from ..api import build_list_query, emit, fail, mutate, paginate, read_stdin, require_fields
+from ..models import Connection, LinearModel
+from .team import resolve_team_id
 
+PROJECT_FIELDS = "id name url state"
 project_app = typer.Typer()
+
+
+class ProjectListNode(LinearModel):
+    id: str
+    name: str
+    url: str
+    state: str
+
+
+class ProjectsData(LinearModel):
+    projects: Connection[ProjectListNode]
 
 
 @project_app.command(name="list")

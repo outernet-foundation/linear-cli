@@ -12,15 +12,7 @@ import httpx
 import typer
 from pydantic import TypeAdapter, ValidationError
 
-from .models import (
-    Connection,
-    IssueSnapshotNode,
-    LabelsData,
-    LinearModel,
-    ResponsePayload,
-    TeamsData,
-)
-from .operations import LABEL_FIELDS, TEAM_FIELDS, build_list_query
+from .models import Connection, LinearModel, ResponsePayload
 from .profiles import CONFIG_PATH, ProfileConfig, load_config, resolve_profile_name
 
 LINEAR_ENDPOINT = "https://api.linear.app/graphql"
@@ -88,32 +80,6 @@ def paginate[T: LinearModel, NodeT](
         after = connection.page_info.end_cursor
 
 
-def resolve_team_id(key: str) -> str:
-    query = build_list_query("teams", TEAM_FIELDS)
-    teams = TeamsData.model_validate(graphql(query, {})).teams.nodes
-    team = next((team for team in teams if team.key == key), None)
-    if team is None:
-        available = ", ".join(sorted(team.key for team in teams))
-        fail(f"No team with key {key!r}; available keys: {available}")
-    return team.id
-
-
-def resolve_label_ids(labels: list[str]) -> list[str]:
-    query = build_list_query("issueLabels", LABEL_FIELDS)
-    all_labels = LabelsData.model_validate(graphql(query, {})).issue_labels.nodes
-    name_to_id = {label.name: label.id for label in all_labels}
-    resolved: list[str] = []
-    for label in labels:
-        if label in name_to_id:
-            resolved.append(name_to_id[label])
-        elif len(label) == 36 and label.count("-") == 4:
-            resolved.append(label)
-        else:
-            available = ", ".join(sorted(name_to_id))
-            fail(f"Unknown label {label!r}; available names: {available}")
-    return resolved
-
-
 def require_fields(fields: dict[str, object], message: str) -> None:
     if not fields:
         fail(message)
@@ -162,6 +128,34 @@ def build_mutation(noun: str, verb: str) -> str:
     return f"mutation($id: String!) {{ {field}(id: $id) {{ success }} }}"
 
 
+def build_list_query(
+    connection: str,
+    fields: str,
+    *,
+    filter_type: str | None = None,
+    paginated: bool = False,
+    archive_aware: bool = False,
+) -> str:
+    vars_def: list[str] = []
+    args: list[str] = ["first: 250"]
+
+    if filter_type:
+        vars_def.append(f"$filter: {filter_type}")
+        args.append("filter: $filter")
+    if paginated:
+        vars_def.append("$after: String")
+        args.append("after: $after")
+    if archive_aware:
+        vars_def.append("$includeArchived: Boolean")
+        args.append("includeArchived: $includeArchived")
+
+    vars_clause = f"({', '.join(vars_def)})" if vars_def else ""
+    args_clause = f"({', '.join(args)})"
+    page_info = "pageInfo { hasNextPage endCursor } " if paginated else ""
+
+    return f"query{vars_clause} {{ {connection}{args_clause} {{ {page_info}nodes {{ {fields} }} }} }}"
+
+
 def resolved_profile_name() -> str:
     return resolve_profile_name(_load_config_or_die(), CliState.profile_override, Path.cwd())
 
@@ -176,30 +170,6 @@ def team_filter(team: str | None) -> dict[str, object]:
 
 def read_stdin() -> str:
     return sys.stdin.read() if not sys.stdin.isatty() else ""
-
-
-def snapshot_issue_dict(node: IssueSnapshotNode) -> dict[str, object]:
-    return {
-        "id": node.id,
-        "identifier": node.identifier,
-        "title": node.title,
-        "description": node.description,
-        "state": node.state.name,
-        "state_type": node.state.type,
-        "team": node.team.key if node.team else None,
-        "project": node.project.name if node.project else None,
-        "priority": node.priority,
-        "archived_at": node.archived_at,
-        "labels": [label.name for label in node.labels.nodes],
-        "comments": [
-            {
-                "body": comment.body,
-                "user": comment.user.name if comment.user else None,
-                "created_at": comment.created_at,
-            }
-            for comment in node.comments.nodes
-        ],
-    }
 
 
 def _expect_dict(value: object | None) -> dict[str, object]:

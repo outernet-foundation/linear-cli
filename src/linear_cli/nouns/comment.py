@@ -4,7 +4,7 @@ from typing import Annotated
 
 import typer
 
-from ..client import emit, fail, mutate, read_stdin
+from ..api import emit, fail, mutate, read_stdin
 
 comment_app = typer.Typer()
 

@@ -1,13 +1,9 @@
 from __future__ import annotations
 
-from linear_cli.client import DELETE_VERBS, RESOURCES, build_mutation
-from linear_cli.models import TeamNode
-from linear_cli.operations import (
-    ISSUE_LIST_FIELDS,
-    LABEL_FIELDS,
-    TEAM_FIELDS,
-    build_list_query,
-)
+from linear_cli.api import DELETE_VERBS, RESOURCES, build_list_query, build_mutation
+from linear_cli.nouns.issue import ISSUE_LIST_FIELDS
+from linear_cli.nouns.label import LABEL_FIELDS
+from linear_cli.nouns.team import TEAM_FIELDS, TeamNode
 
 
 def test_team_node_parses_id_key_name() -> None:

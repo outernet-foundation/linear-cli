@@ -1,10 +1,6 @@
 from __future__ import annotations
 
-from linear_cli.snapshot import identifier_sort_key, label_snapshot_filter
-
-
-def test_label_snapshot_filter_uses_label_name_eq() -> None:
-    assert label_snapshot_filter("packet/2026-07-omnibus") == {"labels": {"name": {"eq": "packet/2026-07-omnibus"}}}
+from linear_cli.nouns.issue import identifier_sort_key
 
 
 def test_identifier_sort_key_numeric_within_team() -> None:

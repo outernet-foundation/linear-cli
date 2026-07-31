@@ -5,9 +5,8 @@ from typing import Annotated
 import typer
 from pydantic import Field
 
-from ..client import emit, mutate, paginate, team_filter
+from ..api import build_list_query, emit, mutate, paginate, team_filter
 from ..models import Connection, LinearModel, NodeList
-from ..operations import build_list_query
 
 _RELATIONS_FIELDS = "identifier relations { nodes { type relatedIssue { identifier } } }"
 

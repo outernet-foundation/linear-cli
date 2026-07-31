@@ -3,12 +3,24 @@ from __future__ import annotations
 from typing import Annotated
 
 import typer
+from pydantic import Field
 
-from ..client import emit, graphql, mutate, resolve_team_id, team_filter
-from ..models import WorkflowStatesData
-from ..operations import WORKFLOW_STATE_FIELDS, build_list_query
+from ..api import build_list_query, emit, graphql, mutate, team_filter
+from ..models import LinearModel, NodeList
+from .team import resolve_team_id
 
+WORKFLOW_STATE_FIELDS = "id name type"
 workflow_state_app = typer.Typer()
+
+
+class WorkflowStateNode(LinearModel):
+    id: str
+    name: str
+    type: str
+
+
+class WorkflowStatesData(LinearModel):
+    workflow_states: NodeList[WorkflowStateNode] = Field(alias="workflowStates")
 
 
 @workflow_state_app.command(name="list")

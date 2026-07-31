@@ -7,7 +7,8 @@ from typing import Annotated
 import typer
 from pydantic import Field
 
-from ..client import (
+from ..api import (
+    build_list_query,
     emit,
     fail,
     graphql,
@@ -15,27 +16,24 @@ from ..client import (
     paginate,
     read_stdin,
     require_fields,
-    resolve_label_ids,
-    resolve_team_id,
     resolved_profile_name,
-    snapshot_issue_dict,
     team_filter,
 )
-from ..models import (
-    IssueSnapshotData,
-    IssuesData,
-    IssueSnapshotNode,
-    IssueStateNode,
-    LinearModel,
-    NodeList,
-    ProjectRef,
-    TeamNode,
-    WorkflowStatesData,
-)
-from ..operations import ISSUE_LIST_FIELDS, ISSUE_SNAPSHOT_FIELDS, WORKFLOW_STATE_FIELDS, build_list_query
-from ..snapshot import identifier_sort_key, label_snapshot_filter
+from ..models import Connection, LinearModel, NodeList
 from ..validation import validate_body, validate_title
+from .label import resolve_label_ids
+from .team import TeamNode, resolve_team_id
+from .workflow_state import WORKFLOW_STATE_FIELDS, WorkflowStatesData
 
+ISSUE_LIST_FIELDS = (
+    "id identifier title description url createdAt archivedAt "
+    "state { name type } labels { nodes { name } } project { id name }"
+)
+ISSUE_SNAPSHOT_FIELDS = (
+    "id identifier title description priority archivedAt "
+    "state { name type } team { id key name } project { id name } "
+    "labels { nodes { name } } comments { nodes { body createdAt user { name } } }"
+)
 _DETAIL_FIELDS = (
     "identifier title description url createdAt archivedAt "
     "state { name type } team { id key name } project { id name } "
@@ -43,6 +41,24 @@ _DETAIL_FIELDS = (
 )
 
 issue_app = typer.Typer()
+
+
+class IssueStateNode(LinearModel):
+    name: str
+    type: str
+
+
+class IssueLabelName(LinearModel):
+    name: str
+
+
+class ProjectRef(LinearModel):
+    id: str
+    name: str
+
+
+class CommentUserNode(LinearModel):
+    name: str
 
 
 class AttachmentNode(LinearModel):
@@ -55,6 +71,47 @@ class AttachmentNode(LinearModel):
 
 class LabelIdRef(LinearModel):
     id: str
+
+
+class IssueListNode(LinearModel):
+    id: str
+    identifier: str
+    title: str
+    description: str | None = None
+    url: str
+    created_at: str = Field(alias="createdAt")
+    archived_at: str | None = Field(default=None, alias="archivedAt")
+    state: IssueStateNode
+    labels: NodeList[IssueLabelName]
+    project: ProjectRef | None = None
+
+
+class IssuesData(LinearModel):
+    issues: Connection[IssueListNode]
+
+
+class IssueSnapshotCommentNode(LinearModel):
+    body: str | None = None
+    created_at: str = Field(alias="createdAt")
+    user: CommentUserNode | None = None
+
+
+class IssueSnapshotNode(LinearModel):
+    id: str
+    identifier: str
+    title: str
+    description: str | None = None
+    priority: int = 0
+    archived_at: str | None = Field(default=None, alias="archivedAt")
+    state: IssueStateNode
+    team: TeamNode | None = None
+    project: ProjectRef | None = None
+    labels: NodeList[IssueLabelName]
+    comments: NodeList[IssueSnapshotCommentNode]
+
+
+class IssueSnapshotData(LinearModel):
+    issues: Connection[IssueSnapshotNode]
 
 
 class IssueDetailNode(LinearModel):
@@ -79,8 +136,43 @@ class IssueSnapshotByIdData(LinearModel):
     issue: IssueSnapshotNode
 
 
+def snapshot_issue_dict(node: IssueSnapshotNode) -> dict[str, object]:
+    return {
+        "id": node.id,
+        "identifier": node.identifier,
+        "title": node.title,
+        "description": node.description,
+        "state": node.state.name,
+        "state_type": node.state.type,
+        "team": node.team.key if node.team else None,
+        "project": node.project.name if node.project else None,
+        "priority": node.priority,
+        "archived_at": node.archived_at,
+        "labels": [label.name for label in node.labels.nodes],
+        "comments": [
+            {
+                "body": comment.body,
+                "user": comment.user.name if comment.user else None,
+                "created_at": comment.created_at,
+            }
+            for comment in node.comments.nodes
+        ],
+    }
+
+
 def _node_query(fields: str) -> str:
     return f"query($id: String!) {{ issue(id: $id) {{ {fields} }} }}"
+
+
+def _label_snapshot_filter(label: str) -> dict[str, object]:
+    return {"labels": {"name": {"eq": label}}}
+
+
+def identifier_sort_key(identifier: str) -> tuple[str, int]:
+    team, _, number = identifier.partition("-")
+    if number.isdigit():
+        return (team, int(number))
+    return (identifier, 0)
 
 
 def _enforce_conventions(title: str | None, body: str | None) -> None:
@@ -281,7 +373,7 @@ def issue_snapshot(
     elif label is not None:
         list_query = build_list_query("issues", ISSUE_SNAPSHOT_FIELDS, filter_type="IssueFilter", paginated=True)
         nodes = list(
-            paginate(list_query, {"filter": label_snapshot_filter(label)}, IssueSnapshotData, lambda data: data.issues)
+            paginate(list_query, {"filter": _label_snapshot_filter(label)}, IssueSnapshotData, lambda data: data.issues)
         )
     else:
         fail("Pass --issue (repeatable) or --label to select issues to snapshot.")
