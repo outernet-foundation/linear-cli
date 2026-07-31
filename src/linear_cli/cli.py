@@ -20,7 +20,7 @@ from .profiles import (
     resolve_profile_name,
 )
 from .snapshot import identifier_sort_key, label_snapshot_filter
-from .validation import orphan_design_docs, validate_body, validate_title
+from .validation import orphan_design_docs, validate_body, validate_label_presence, validate_title
 
 LINEAR_ENDPOINT = "https://api.linear.app/graphql"
 OPERATIONS_DOCUMENT = "linear_operations.graphql"
@@ -602,15 +602,47 @@ def lint(
     design_orphans: Annotated[
         bool, typer.Option("--design-orphans", help="Also flag design/ docs that no open ticket links")
     ] = False,
+    include_canceled: Annotated[
+        bool, typer.Option("--include-canceled", help="Also lint canceled issues")
+    ] = False,
+    require_label_parent: Annotated[
+        str | None,
+        typer.Option("--require-label-parent", help="Require every ticket to carry a label in this parent group, e.g. repo"),
+    ] = None,
 ) -> None:
+    skip_types = {"completed"}
+    if not include_canceled:
+        skip_types.add("canceled")
+
+    group_labels: set[str] | None = None
+    if require_label_parent is not None:
+        all_labels = graphql("Labels", {}, LabelsData).issue_labels.nodes
+        names_by_id = {label.id: label.name for label in all_labels}
+        group_labels = {
+            label.name
+            for label in all_labels
+            if label.parent and names_by_id.get(label.parent.id) == require_label_parent
+        }
+        if not group_labels:
+            typer.echo(
+                f"No labels found in group {require_label_parent!r}; available groups: "
+                f"{', '.join(sorted(label.name for label in all_labels if label.is_group))}",
+                err=True,
+            )
+            raise typer.Exit(1)
+
     offenders = 0
     open_bodies: list[str] = []
     for issue in _paginate("Issues", {"filter": _team_filter(team)}, IssuesData, lambda data: data.issues):
-        if issue.state.type in ("completed", "canceled"):
+        if issue.state.type in skip_types:
             continue
 
         open_bodies.append(issue.description or "")
         violations = validate_title(issue.title) + validate_body(issue.description or "")
+        if group_labels is not None:
+            violations += validate_label_presence(
+                [label.name for label in issue.labels.nodes], group_labels, require_label_parent
+            )
         if violations:
             offenders += 1
             _emit({"identifier": issue.identifier, "title": issue.title, "violations": violations})

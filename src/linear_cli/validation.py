@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from urllib.parse import urlparse
 
 WHY_HEADER = "**Why:**"
 DONE_HEADER = "**Done when:**"
@@ -11,9 +12,16 @@ SAME_LINE_HEADERS = (WHY_HEADER, DONE_HEADER)
 RETIRED_MARKERS = ("SPEC.md", ".pulsar/memories")
 
 _LINK_TARGET = re.compile(r"\]\(\s*<?([^)>]+?)>?\s*\)")
+_MARKDOWN_LINK = re.compile(r"\[[^\]]*\]\([^)]*\)")
 _TITLE_PREFIX = re.compile(
     r"^\s*(\[|\d+[.)]\s|PLE-\d+|(repo|type|bug|chore|feature|refactor|docs|improvement):)", re.IGNORECASE
 )
+_FORBIDDEN_SECTIONS = re.compile(
+    r"^[\s#*]*(Checklist|Changes\s+needed|Implementation\s+steps|Task\s+list)[\s*:.*]*$",
+    re.MULTILINE | re.IGNORECASE,
+)
+_BARE_PATH = re.compile(r"(?<![\w/])[\w][\w.-]*(?:/[\w.-]+)+\.(?:md|py|yml|yaml|json|xlsx|docx|pdf)\b")
+_FILENAME_TLDS = frozenset({"py", "md", "json", "yml", "yaml", "txt", "csv", "ts", "js", "rs", "go", "cs", "sh", "sql", "tsx", "jsx"})
 
 
 def validate_title(title: str) -> list[str]:
@@ -47,11 +55,38 @@ def validate_body(body: str) -> list[str]:
                 f"retired reference {marker!r} — link the co-located AGENTS.md by GitHub blob URL instead"
             )
 
+    for match in _FORBIDDEN_SECTIONS.finditer(body):
+        violations.append(
+            f"forbidden section {match.group().strip()!r} — implementation plans belong in sub-issues or PRs, not ticket bodies"
+        )
+
     for target in _LINK_TARGET.findall(body):
-        if not target.startswith(("http://", "https://")):
+        parsed = urlparse(target)
+        hostname = parsed.hostname or ""
+        if parsed.scheme not in ("http", "https"):
             violations.append(f"link target {target!r} is not an absolute URL — use a full github.com blob URL on dev")
+        elif "." not in hostname:
+            violations.append(f"link target {target!r} has no valid hostname — use a full github.com blob URL")
+        elif hostname.split(".")[-1].lower() in _FILENAME_TLDS:
+            violations.append(
+                f"link target {target!r} looks like a bare filename auto-linked as a URL — use a full github.com blob URL"
+            )
+
+    body_without_links = _MARKDOWN_LINK.sub("", body)
+    for match in _BARE_PATH.finditer(body_without_links):
+        violations.append(
+            f"bare path {match.group()!r} in body — use a full github.com blob URL instead of a repo-relative path"
+        )
 
     return violations
+
+
+def validate_label_presence(
+    label_names: list[str], required_group_labels: set[str], group_name: str
+) -> list[str]:
+    if not any(name in required_group_labels for name in label_names):
+        return [f"ticket carries no label in the {group_name!r} group"]
+    return []
 
 
 def orphan_design_docs(doc_names: list[str], ticket_bodies: list[str]) -> list[str]:

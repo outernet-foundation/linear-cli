@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from linear_cli.validation import orphan_design_docs, validate_body, validate_title
+from linear_cli.validation import orphan_design_docs, validate_body, validate_label_presence, validate_title
 
 CONFORMING = (
     "**Why:** The thing is broken in a specific, self-contained way.\n\n"
@@ -71,3 +71,45 @@ def test_prefixed_titles_are_flagged() -> None:
     assert validate_title("1. Delete the gate") != []
     assert validate_title("PLE-339 Delete the gate") != []
     assert validate_title("bug: Delete the gate") != []
+
+
+def test_forbidden_checklist_section_is_flagged() -> None:
+    body = CONFORMING + "\n\nChecklist:\n- Do thing one\n- Do thing two"
+    assert any("forbidden section" in v for v in validate_body(body))
+
+
+def test_forbidden_markdown_checklist_header_is_flagged() -> None:
+    body = CONFORMING + "\n\n## Checklist\n\nItems here"
+    assert any("forbidden section" in v for v in validate_body(body))
+
+
+def test_forbidden_changes_needed_section_is_flagged() -> None:
+    body = CONFORMING + "\n\nChanges needed:\nRemove X, add Y"
+    assert any("forbidden section" in v for v in validate_body(body))
+
+
+def test_garbage_autolink_hostname_is_flagged() -> None:
+    body = CONFORMING.replace(
+        "[reconstructor/AGENTS.md](https://github.com/outernet-foundation/placeframe/blob/dev/docker/reconstructor/AGENTS.md)",
+        "[snapshot.py](http://snapshot.py)",
+    )
+    assert any("bare filename" in v for v in validate_body(body))
+
+
+def test_bare_path_in_prose_is_flagged() -> None:
+    body = CONFORMING + "\n\nSee policies/governance-manual.md for details."
+    assert any("bare path" in v for v in validate_body(body))
+
+
+def test_bare_path_inside_markdown_link_text_is_not_flagged() -> None:
+    assert validate_body(CONFORMING) == []
+
+
+def test_label_presence_passes_when_group_label_present() -> None:
+    assert validate_label_presence(["governance", "chore"], {"governance", "multi-repo"}, "repo") == []
+
+
+def test_label_presence_fails_when_no_group_label() -> None:
+    violations = validate_label_presence([], {"governance", "multi-repo"}, "repo")
+    assert len(violations) == 1
+    assert "repo" in violations[0]
