@@ -72,6 +72,8 @@ A project's `teamIds` list gates which teams' issues it can collect. `update-iss
 
 **Priority is per-team.** Three effective levels: Urgent (1), High (2), and No Priority (0) — the default. GOV and OPS use priority; most tickets stay at 0 (normal), with Urgent reserved for deadlines or legal requirements and High for work that blocks other items. PLE does not use priority — product features are sequenced through the `blocks` graph and project ordering, not through a priority field. Never set Medium (3) or Low (4); "normal" is the absence of priority, not an explicit level.
 
+**`type/bug` vs `type/defect`.** A bug is wrong behavior whose root cause is not yet determined — investigation is active, and the ticket holds the repro, call stack, and hypotheses. A defect is wrong behavior with a determined root cause — the ticket is a thin acceptance-criteria artifact and the prose lives in repo docs. A bug becomes a defect once its root cause is found; the transition is a label swap, not a team move.
+
 ## See also
 
 - `README.md` — human-facing setup and usage.
