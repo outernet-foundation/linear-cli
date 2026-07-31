@@ -3,19 +3,15 @@ from __future__ import annotations
 import json
 import re
 import sys
-from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
-from functools import cache
 from pathlib import Path
-from typing import Annotated, NoReturn
+from typing import Annotated
 
-import httpx
 import typer
 from bashrun import bash_check, bash_output
-from pydantic import TypeAdapter, ValidationError
 
+from .client import CliState, fail, graphql, mutate, paginate, resolved_profile_name
 from .models import (
-    Connection,
     IssueDetailData,
     IssueListNode,
     IssueRelationsData,
@@ -25,37 +21,24 @@ from .models import (
     IssuesData,
     LabelNode,
     LabelsData,
-    LinearModel,
     ProjectsData,
-    ResponsePayload,
     TeamsData,
     WorkflowStatesData,
 )
 from .operations import (
-    DELETE_VERBS,
     ISSUE_DETAIL_FIELDS,
     ISSUE_LIST_FIELDS,
     ISSUE_RELATIONS_FIELDS,
     ISSUE_SNAPSHOT_FIELDS,
     LABEL_FIELDS,
     PROJECT_FIELDS,
-    RESOURCES,
     TEAM_FIELDS,
     WORKFLOW_STATE_FIELDS,
     build_list_query,
-    build_mutation,
     build_node_query,
-)
-from .profiles import (
-    CONFIG_PATH,
-    ProfileConfig,
-    load_config,
-    resolve_profile_name,
 )
 from .snapshot import identifier_sort_key, label_snapshot_filter
 from .validation import fix_bare_paths, orphan_design_docs, validate_body, validate_label_presence, validate_title
-
-LINEAR_ENDPOINT = "https://api.linear.app/graphql"
 
 app = typer.Typer(add_completion=False, pretty_exceptions_show_locals=False)
 issue_app = typer.Typer()
@@ -77,10 +60,6 @@ app.add_typer(comment_app, name="comment")
 app.add_typer(workspace_app, name="workspace")
 
 
-class _CliState:
-    profile_override: str | None = None
-
-
 @app.callback()
 def root_callback(
     profile: Annotated[
@@ -88,7 +67,7 @@ def root_callback(
         typer.Option("--profile", help="Profile name from ~/.config/linear-cli/config.json"),
     ] = None,
 ) -> None:
-    _CliState.profile_override = profile
+    CliState.profile_override = profile
 
 
 @app.command()
@@ -122,7 +101,7 @@ def lint(
     offenders = 0
     open_bodies: list[str] = []
     query = build_list_query("issues", ISSUE_LIST_FIELDS, filter_type="IssueFilter", paginated=True, archive_aware=True)
-    for issue in _paginate(query, {"filter": _team_filter(team)}, IssuesData, lambda data: data.issues):
+    for issue in paginate(query, {"filter": _team_filter(team)}, IssuesData, lambda data: data.issues):
         if issue.state.type in skip_types:
             continue
 
@@ -151,7 +130,7 @@ def find_references(
     ] = False,
 ) -> None:
     if not bash_check("git rev-parse --show-toplevel"):
-        _fail("Not inside a git repository")
+        fail("Not inside a git repository")
 
     repository_root = Path(bash_output("git rev-parse --show-toplevel").strip())
     boundary = re.compile(r"\b" + re.escape(identifier) + r"\b")
@@ -172,7 +151,7 @@ def find_references(
 
     if scan_linear:
         query = build_list_query("issues", ISSUE_LIST_FIELDS, filter_type="IssueFilter", paginated=True)
-        for issue in _paginate(query, {}, IssuesData, lambda data: data.issues):
+        for issue in paginate(query, {}, IssuesData, lambda data: data.issues):
             if boundary.search(issue.description or "") or boundary.search(issue.title):
                 _emit({"source": issue.identifier, "line": 0, "context": "ticket body"})
 
@@ -192,7 +171,7 @@ def issue_list(
     if include_archived:
         variables["includeArchived"] = True
     query = build_list_query("issues", ISSUE_LIST_FIELDS, filter_type="IssueFilter", paginated=True, archive_aware=True)
-    for issue in _paginate(query, variables, IssuesData, lambda data: data.issues):
+    for issue in paginate(query, variables, IssuesData, lambda data: data.issues):
         _emit({
             "id": issue.id,
             "identifier": issue.identifier,
@@ -308,7 +287,7 @@ def issue_update(
         fields["teamId"] = _resolve_team_id(team)
     if state is not None:
         if team is None:
-            _fail("--state requires --team to specify which team's workflow to resolve against")
+            fail("--state requires --team to specify which team's workflow to resolve against")
         fields["stateId"] = _resolve_state_id(state, team)
 
     if priority is not None:
@@ -340,7 +319,7 @@ def issue_snapshot(
     ] = None,
 ) -> None:
     if issue is not None and label is not None:
-        _fail("Pass --issue or --label, not both.")
+        fail("Pass --issue or --label, not both.")
 
     if issue is not None:
         node_query = build_node_query("issue", ISSUE_SNAPSHOT_FIELDS)
@@ -350,17 +329,17 @@ def issue_snapshot(
     elif label is not None:
         list_query = build_list_query("issues", ISSUE_SNAPSHOT_FIELDS, filter_type="IssueFilter", paginated=True)
         nodes = list(
-            _paginate(list_query, {"filter": label_snapshot_filter(label)}, IssueSnapshotData, lambda data: data.issues)
+            paginate(list_query, {"filter": label_snapshot_filter(label)}, IssueSnapshotData, lambda data: data.issues)
         )
     else:
-        _fail("Pass --issue (repeatable) or --label to select issues to snapshot.")
+        fail("Pass --issue (repeatable) or --label to select issues to snapshot.")
     nodes.sort(key=lambda node: identifier_sort_key(node.identifier))
 
     typer.echo(
         json.dumps(
             {
                 "captured_at": datetime.now(UTC).isoformat(),
-                "linear_profile": _resolved_profile_name(),
+                "linear_profile": resolved_profile_name(),
                 "issues": [_snapshot_issue_dict(node) for node in nodes],
             },
             indent=2,
@@ -373,7 +352,7 @@ def relation_list(
     team: Annotated[str | None, typer.Option("--team", help="Team key to filter by, e.g. PLE")] = None,
 ) -> None:
     query = build_list_query("issues", ISSUE_RELATIONS_FIELDS, filter_type="IssueFilter", paginated=True)
-    for issue_node in _paginate(query, {"filter": _team_filter(team)}, IssueRelationsData, lambda data: data.issues):
+    for issue_node in paginate(query, {"filter": _team_filter(team)}, IssueRelationsData, lambda data: data.issues):
         for relation in issue_node.relations.nodes:
             if relation.related_issue is None:
                 continue
@@ -397,7 +376,7 @@ def comment_create(
 ) -> None:
     body = _read_stdin()
     if not body.strip():
-        _fail("No comment body on stdin")
+        fail("No comment body on stdin")
 
     _emit(mutate("comment", "Create", {"input": {"issueId": issue_id, "body": body}}))
 
@@ -412,7 +391,7 @@ def comment_delete(
 @project_app.command(name="list")
 def project_list() -> None:
     query = build_list_query("projects", PROJECT_FIELDS, paginated=True)
-    for project in _paginate(query, {}, ProjectsData, lambda data: data.projects):
+    for project in paginate(query, {}, ProjectsData, lambda data: data.projects):
         _emit({"id": project.id, "name": project.name, "state": project.state, "url": project.url})
 
 
@@ -452,7 +431,7 @@ def project_update(
         fields["content"] = content
     if team is not None:
         if len(team) == 0:
-            _fail("--team requires at least one team key")
+            fail("--team requires at least one team key")
         fields["teamIds"] = [_resolve_team_id(key) for key in team]
 
     _require_fields(fields, "Nothing to update; pass --team, --name, --summary, or a body on stdin")
@@ -593,7 +572,7 @@ def label_update(
         labels = LabelsData.model_validate(graphql(query, {})).issue_labels.nodes
         groups = [node for node in labels if node.is_group and node.name == parent]
         if len(groups) != 1:
-            _fail(f"Expected exactly one group named {parent!r}, found {len(groups)}")
+            fail(f"Expected exactly one group named {parent!r}, found {len(groups)}")
 
         fields["parentId"] = groups[0].id
 
@@ -612,13 +591,13 @@ def label_delete(
 @workspace_app.command(name="snapshot")
 def workspace_snapshot() -> None:
     captured_at = datetime.now(UTC).isoformat()
-    profile_name = _resolved_profile_name()
+    profile_name = resolved_profile_name()
 
     teams_query = build_list_query("teams", TEAM_FIELDS)
     teams = TeamsData.model_validate(graphql(teams_query, {})).teams.nodes
 
     projects_query = build_list_query("projects", PROJECT_FIELDS, paginated=True)
-    projects = list(_paginate(projects_query, {}, ProjectsData, lambda data: data.projects))
+    projects = list(paginate(projects_query, {}, ProjectsData, lambda data: data.projects))
 
     labels_query = build_list_query("issueLabels", LABEL_FIELDS)
     labels = LabelsData.model_validate(graphql(labels_query, {})).issue_labels.nodes
@@ -629,7 +608,7 @@ def workspace_snapshot() -> None:
     issues_query = build_list_query(
         "issues", ISSUE_SNAPSHOT_FIELDS, filter_type="IssueFilter", paginated=True, archive_aware=True
     )
-    issues = list(_paginate(issues_query, {"includeArchived": True}, IssueSnapshotData, lambda data: data.issues))
+    issues = list(paginate(issues_query, {"includeArchived": True}, IssueSnapshotData, lambda data: data.issues))
 
     record = {
         "captured_at": captured_at,
@@ -656,97 +635,9 @@ def workspace_snapshot() -> None:
     typer.echo(json.dumps(record, indent=2))
 
 
-def _fail(message: str) -> NoReturn:
-    typer.echo(message, err=True)
-    raise typer.Exit(1)
-
-
-@cache
-def _load_config_or_die() -> ProfileConfig:
-    config = load_config()
-    if config is None:
-        _fail(f"No profile config found at {CONFIG_PATH}; create one with profiles and path_defaults.")
-    return config
-
-
-@cache
-def _resolved_profile_name() -> str:
-    return resolve_profile_name(_load_config_or_die(), _CliState.profile_override, Path.cwd())
-
-
-def graphql(query: str, variables: dict[str, object]) -> dict[str, object]:
-    response = httpx.post(
-        LINEAR_ENDPOINT,
-        headers={
-            "Authorization": _load_config_or_die().root[_resolved_profile_name()].api_key,
-            "Content-Type": "application/json",
-        },
-        json={"query": query, "variables": variables},
-        timeout=30.0,
-    )
-    try:
-        payload = ResponsePayload.model_validate_json(response.content).root
-    except ValidationError:
-        _fail(f"Linear API returned a malformed response (HTTP {response.status_code}): {response.text[:200]}")
-
-    errors = payload.get("errors")
-    if errors:
-        _fail(f"Linear API error: {json.dumps(errors)}")
-
-    data = payload.get("data")
-    if data is None:
-        _fail(f"Linear API returned no data (HTTP {response.status_code})")
-
-    return _expect_dict(data)
-
-
-_dict_adapter = TypeAdapter(dict[str, object])
-
-
-def _expect_dict(value: object | None) -> dict[str, object]:
-    try:
-        return _dict_adapter.validate_python(value)
-    except ValidationError:
-        _fail("Linear API returned an unexpected response shape")
-
-
-def mutate(noun: str, verb: str, variables: dict[str, object]) -> dict[str, object]:
-    query = build_mutation(noun, verb)
-    data = graphql(query, variables)
-    field = f"{noun}{verb}"
-    result = _expect_dict(data.get(field))
-    if not result.get("success"):
-        _fail(f"Linear API mutation {field} failed")
-
-    if verb in DELETE_VERBS:
-        return {"id": variables["id"], DELETE_VERBS[verb]: True}
-
-    resource = RESOURCES[noun]
-    if not resource.return_fields:
-        return {}
-
-    return _expect_dict(result.get(resource.node))
-
-
-def _paginate[T: LinearModel, NodeT](
-    query: str,
-    variables: dict[str, object],
-    model: type[T],
-    select: Callable[[T], Connection[NodeT]],
-) -> Iterator[NodeT]:
-    after: str | None = None
-    while True:
-        connection = select(model.model_validate(graphql(query, {**variables, "after": after})))
-        yield from connection.nodes
-        if not connection.page_info.has_next_page:
-            break
-
-        after = connection.page_info.end_cursor
-
-
 def _require_fields(fields: dict[str, object], message: str) -> None:
     if not fields:
-        _fail(message)
+        fail(message)
 
 
 def _team_filter(team: str | None) -> dict[str, object]:
@@ -769,7 +660,7 @@ def _enforce_conventions(title: str | None, body: str | None) -> None:
     for violation in violations:
         typer.echo(f"convention violation: {violation}", err=True)
 
-    _fail("Refusing to write: fix the title/body to match the AGENTS.md conventions.")
+    fail("Refusing to write: fix the title/body to match the AGENTS.md conventions.")
 
 
 def _issue_violations(
@@ -820,7 +711,7 @@ def _orphaned_design_docs(open_bodies: list[str]) -> list[str]:
         None,
     )
     if design_dir is None:
-        _fail("No design/AGENTS.md found in the current directory or any parent; run from inside the repo")
+        fail("No design/AGENTS.md found in the current directory or any parent; run from inside the repo")
     doc_names = [path.name for path in sorted(design_dir.glob("*.md")) if path.name not in ("AGENTS.md", "CLAUDE.md")]
     return orphan_design_docs(doc_names, open_bodies)
 
@@ -831,7 +722,7 @@ def _resolve_team_id(key: str) -> str:
     team = next((team for team in teams if team.key == key), None)
     if team is None:
         available = ", ".join(sorted(team.key for team in teams))
-        _fail(f"No team with key {key!r}; available keys: {available}")
+        fail(f"No team with key {key!r}; available keys: {available}")
     return team.id
 
 
@@ -843,7 +734,7 @@ def _resolve_label_group(group_name: str) -> set[str]:
         label.name for label in all_labels if label.parent and names_by_id.get(label.parent.id) == group_name
     }
     if not group_labels:
-        _fail(
+        fail(
             f"No labels found in group {group_name!r}; available groups: "
             f"{', '.join(sorted(label.name for label in all_labels if label.is_group))}"
         )
@@ -856,7 +747,7 @@ def _resolve_state_id(state: str, team: str) -> str:
     matches = [candidate for candidate in states if candidate.name.casefold() == state.casefold()]
     if len(matches) != 1:
         available = ", ".join(sorted(candidate.name for candidate in states))
-        _fail(f"No unique state {state!r} in team {team!r}; available: {available}")
+        fail(f"No unique state {state!r} in team {team!r}; available: {available}")
     return matches[0].id
 
 
@@ -872,7 +763,7 @@ def _resolve_label_ids(labels: list[str]) -> list[str]:
             resolved.append(label)
         else:
             available = ", ".join(sorted(name_to_id))
-            _fail(f"Unknown label {label!r}; available names: {available}")
+            fail(f"Unknown label {label!r}; available names: {available}")
     return resolved
 
 
@@ -899,7 +790,7 @@ def _ensure_label_record(labels: list[LabelNode], name: str, parent_id: str | No
     node = mutate("issueLabel", "Create", {"input": fields})
     node_id = node["id"]
     if not isinstance(node_id, str):
-        _fail("Linear API returned a non-string id for created label")
+        fail("Linear API returned a non-string id for created label")
     return node_id
 
 
