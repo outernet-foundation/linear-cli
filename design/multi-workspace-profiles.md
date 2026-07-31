@@ -39,7 +39,7 @@ An earlier draft used a flat top-level `path_defaults` map keyed by path with pr
 
 ### Why team is not in the config at all
 
-Linear's team concept IS the lifecycle concept — workflow states are team-scoped, so picking a team means picking a lifecycle. A governance resolution moves Drafted → On Agenda → Voted Adopted; a build-script bug moves Backlog → In Progress → Done. Those are categorically different work types that happen to live in the same git repo. `/workspace/governance` produces both, and which lifecycle a given ticket belongs to is a per-ticket decision, not a per-path property.
+Linear's team concept IS the lifecycle concept — workflow states are team-scoped, so picking a team means picking a lifecycle. A governance resolution moves Backlog → Ready → Done; a build-script bug moves Backlog → In Progress → Done. Those are categorically different work types that happen to live in the same git repo. `/workspace/governance` produces both, and which lifecycle a given ticket belongs to is a per-ticket decision, not a per-path property.
 
 Forcing `--team` on every team-scoped call surfaces that decision rather than hiding it behind a misleading default. The friction is the feature: it prevents "filed into the wrong lifecycle" mistakes at write time, the way silent defaults cannot. The cost is real (every `create-issue` needs `--team`), but the alternative — a path-level default — only works for single-team repos, and the multi-team case is common enough that the schema shouldn't pretend it doesn't exist.
 
