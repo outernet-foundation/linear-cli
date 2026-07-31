@@ -1,20 +1,19 @@
 from __future__ import annotations
 
-from pathlib import Path
-
-import linear_cli.cli as cli_module
-from linear_cli.models import (
-    CreatedTeam,
-    CreatedWorkflowState,
-    TeamCreateData,
-    TeamNode,
-    WorkflowStateArchiveData,
-    WorkflowStateCreateData,
+from linear_cli.models import TeamNode
+from linear_cli.operations import (
+    DELETE_VERBS,
+    ISSUE_DETAIL_FIELDS,
+    ISSUE_LIST_FIELDS,
+    LABEL_FIELDS,
+    PROJECT_FIELDS,
+    RESOURCES,
+    TEAM_FIELDS,
+    WORKFLOW_STATE_FIELDS,
+    build_list_query,
+    build_mutation,
+    build_node_query,
 )
-
-
-def _operations_text() -> str:
-    return Path(cli_module.__file__).with_name("linear_operations.graphql").read_text(encoding="utf-8")
 
 
 def test_team_node_parses_id_key_name() -> None:
@@ -24,67 +23,92 @@ def test_team_node_parses_id_key_name() -> None:
     assert node.name == "Governance"
 
 
-def test_created_team_parses_id_key_name() -> None:
-    team = CreatedTeam.model_validate({"id": "abc", "key": "GOV", "name": "Governance"})
-    assert team.id == "abc"
-    assert team.key == "GOV"
-    assert team.name == "Governance"
+def test_build_create_mutation_for_team() -> None:
+    mutation = build_mutation("team", "Create")
+    assert "teamCreate(input: $input)" in mutation
+    assert "TeamCreateInput!" in mutation
+    assert "success team { id key name }" in mutation
 
 
-def test_team_create_data_parses_payload() -> None:
-    data = TeamCreateData.model_validate({
-        "teamCreate": {"success": True, "team": {"id": "abc", "key": "GOV", "name": "Governance"}}
-    })
-    assert data.team_create.success is True
-    assert data.team_create.team is not None
-    assert data.team_create.team.key == "GOV"
+def test_build_update_mutation_for_issue() -> None:
+    mutation = build_mutation("issue", "Update")
+    assert "issueUpdate(id: $id, input: $input)" in mutation
+    assert "IssueUpdateInput!" in mutation
+    assert "success issue { id identifier url }" in mutation
 
 
-def test_team_create_data_parses_failed_payload_with_null_team() -> None:
-    data = TeamCreateData.model_validate({"teamCreate": {"success": False, "team": None}})
-    assert data.team_create.success is False
-    assert data.team_create.team is None
+def test_build_delete_mutation_for_project() -> None:
+    mutation = build_mutation("project", "Delete")
+    assert "projectDelete(id: $id)" in mutation
+    assert "success" in mutation
+    assert "project {" not in mutation
 
 
-def test_created_workflow_state_parses_id_name_type() -> None:
-    state = CreatedWorkflowState.model_validate({"id": "abc", "name": "Done", "type": "completed"})
-    assert state.id == "abc"
-    assert state.name == "Done"
-    assert state.type == "completed"
+def test_build_archive_mutation_for_workflow_state() -> None:
+    mutation = build_mutation("workflowState", "Archive")
+    assert "workflowStateArchive(id: $id)" in mutation
+    assert "success" in mutation
+    assert "workflowState {" not in mutation
 
 
-def test_workflow_state_create_data_parses_payload() -> None:
-    data = WorkflowStateCreateData.model_validate({
-        "workflowStateCreate": {
-            "success": True,
-            "workflowState": {"id": "abc", "name": "On Agenda", "type": "started"},
-        }
-    })
-    assert data.workflow_state_create.success is True
-    assert data.workflow_state_create.workflow_state is not None
-    assert data.workflow_state_create.workflow_state.name == "On Agenda"
+def test_build_create_mutation_for_relation_has_no_node() -> None:
+    mutation = build_mutation("issueRelation", "Create")
+    assert "issueRelationCreate(input: $input)" in mutation
+    assert "IssueRelationCreateInput!" in mutation
+    assert "success }" in mutation
 
 
-def test_workflow_state_archive_data_parses_success() -> None:
-    data = WorkflowStateArchiveData.model_validate({"workflowStateArchive": {"success": True}})
-    assert data.workflow_state_archive.success is True
+def test_build_unarchive_mutation_for_issue() -> None:
+    mutation = build_mutation("issue", "Unarchive")
+    assert "issueUnarchive(id: $id)" in mutation
+    assert "success }" in mutation
 
 
-def test_operations_document_defines_create_team_mutation() -> None:
-    assert "mutation CreateTeam($input: TeamCreateInput!)" in _operations_text()
+def test_build_list_query_simple() -> None:
+    query = build_list_query("teams", TEAM_FIELDS)
+    assert "teams(first: 250)" in query
+    assert "nodes { id key name }" in query
+    assert "pageInfo" not in query
+    assert "$filter" not in query
 
 
-def test_operations_document_defines_create_workflow_state_mutation() -> None:
-    assert "mutation CreateWorkflowState($input: WorkflowStateCreateInput!)" in _operations_text()
+def test_build_list_query_paginated_filtered() -> None:
+    query = build_list_query("issues", ISSUE_LIST_FIELDS, filter_type="IssueFilter", paginated=True, archive_aware=True)
+    assert "$filter: IssueFilter" in query
+    assert "$after: String" in query
+    assert "$includeArchived: Boolean" in query
+    assert "pageInfo { hasNextPage endCursor }" in query
+    assert "filter: $filter" in query
+    assert "includeArchived: $includeArchived" in query
 
 
-def test_operations_document_defines_archive_workflow_state_mutation() -> None:
-    assert "mutation ArchiveWorkflowState($id: String!)" in _operations_text()
+def test_build_list_query_labels() -> None:
+    query = build_list_query("issueLabels", LABEL_FIELDS)
+    assert "issueLabels(first: 250)" in query
+    assert "pageInfo" not in query
 
 
-def test_operations_document_teams_query_selects_name() -> None:
-    text = _operations_text()
-    start = text.index("query Teams {")
-    end = text.index("query Issues(")
-    teams_section = text[start:end]
-    assert "name" in teams_section
+def test_build_node_query() -> None:
+    query = build_node_query("issue", ISSUE_DETAIL_FIELDS)
+    assert "$id: String!" in query
+    assert "issue(id: $id)" in query
+    assert "identifier" in query
+
+
+def test_delete_verbs_mapping() -> None:
+    assert DELETE_VERBS["Delete"] == "deleted"
+    assert DELETE_VERBS["Archive"] == "archived"
+    assert DELETE_VERBS["Unarchive"] == "unarchived"
+
+
+def test_resources_cover_all_nouns() -> None:
+    expected = {"team", "issue", "project", "issueLabel", "workflowState", "comment", "issueRelation"}
+    assert set(RESOURCES) == expected
+
+
+def test_resources_return_fields_match_expected() -> None:
+    assert RESOURCES["team"].return_fields == "id key name"
+    assert RESOURCES["workflowState"].return_fields == "id name type"
+    assert RESOURCES["project"].return_fields == "id url"
+    assert RESOURCES["issue"].return_fields == "id identifier url"
+    assert not RESOURCES["issueRelation"].return_fields

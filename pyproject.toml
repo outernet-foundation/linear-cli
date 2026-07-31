@@ -24,7 +24,6 @@ linear = "linear_cli.cli:app"
 packages = ["src/linear_cli"]
 include = [
     "src/linear_cli/py.typed",
-    "src/linear_cli/linear_operations.graphql",
 ]
 
 [tool.uv.sources]

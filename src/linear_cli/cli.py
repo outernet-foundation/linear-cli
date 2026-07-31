@@ -12,40 +12,39 @@ from typing import Annotated, NoReturn
 import httpx
 import typer
 from bashrun import bash_check, bash_output
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
 from .models import (
-    CommentCreateData,
-    CommentDeleteData,
-    IssueCreateData,
+    Connection,
     IssueDetailData,
-    IssueLabelCreateData,
-    IssueLabelDeleteData,
-    IssueLabelUpdateData,
     IssueListNode,
-    IssueRelationCreateData,
     IssueRelationsData,
     IssueSnapshotByIdData,
     IssueSnapshotData,
     IssueSnapshotNode,
-    IssueUnarchiveData,
-    IssueUpdateData,
     IssuesData,
     LabelNode,
     LabelsData,
-    ProjectCreateData,
-    ProjectDeleteData,
-    ProjectUpdateData,
+    LinearModel,
     ProjectsData,
     ResponsePayload,
-    TeamCreateData,
-    TeamUpdateData,
     TeamsData,
-    WorkflowStateArchiveData,
-    WorkflowStateCreateData,
     WorkflowStatesData,
-    Connection,
-    LinearModel,
+)
+from .operations import (
+    DELETE_VERBS,
+    ISSUE_DETAIL_FIELDS,
+    ISSUE_LIST_FIELDS,
+    ISSUE_RELATIONS_FIELDS,
+    ISSUE_SNAPSHOT_FIELDS,
+    LABEL_FIELDS,
+    PROJECT_FIELDS,
+    RESOURCES,
+    TEAM_FIELDS,
+    WORKFLOW_STATE_FIELDS,
+    build_list_query,
+    build_mutation,
+    build_node_query,
 )
 from .profiles import (
     CONFIG_PATH,
@@ -57,10 +56,25 @@ from .snapshot import identifier_sort_key, label_snapshot_filter
 from .validation import fix_bare_paths, orphan_design_docs, validate_body, validate_label_presence, validate_title
 
 LINEAR_ENDPOINT = "https://api.linear.app/graphql"
-OPERATIONS_DOCUMENT = "linear_operations.graphql"
-_OPERATIONS = Path(__file__).with_name(OPERATIONS_DOCUMENT).read_text(encoding="utf-8")
 
 app = typer.Typer(add_completion=False, pretty_exceptions_show_locals=False)
+issue_app = typer.Typer()
+project_app = typer.Typer()
+team_app = typer.Typer()
+workflow_state_app = typer.Typer()
+label_app = typer.Typer()
+relation_app = typer.Typer()
+comment_app = typer.Typer()
+workspace_app = typer.Typer()
+
+app.add_typer(issue_app, name="issue")
+app.add_typer(project_app, name="project")
+app.add_typer(team_app, name="team")
+app.add_typer(workflow_state_app, name="workflow-state")
+app.add_typer(label_app, name="label")
+app.add_typer(relation_app, name="relation")
+app.add_typer(comment_app, name="comment")
+app.add_typer(workspace_app, name="workspace")
 
 
 class _CliState:
@@ -77,74 +91,56 @@ def root_callback(
     _CliState.profile_override = profile
 
 
-@app.command(name="list-issues")
-def list_issues(
+@app.command()
+def lint(
     team: Annotated[str | None, typer.Option("--team", help="Team key to filter by, e.g. PLE")] = None,
-    label: Annotated[str | None, typer.Option("--label", help="Label name to filter by")] = None,
-    include_archived: Annotated[
-        bool, typer.Option("--include-archived", help="Include archived issues in results")
+    design_orphans: Annotated[
+        bool, typer.Option("--design-orphans", help="Also flag design/ docs that no open ticket links")
+    ] = False,
+    include_canceled: Annotated[bool, typer.Option("--include-canceled", help="Also lint canceled issues")] = False,
+    require_label_parent: Annotated[
+        str | None,
+        typer.Option(
+            "--require-label-parent", help="Require every ticket to carry a label in this parent group, e.g. repo"
+        ),
+    ] = None,
+    fix_paths: Annotated[
+        bool,
+        typer.Option("--fix-paths", help="Auto-fix bare repo-relative paths in ticket bodies to full GitHub blob URLs"),
     ] = False,
 ) -> None:
-    filter_dict: dict[str, object] = _team_filter(team)
-    if label is not None:
-        filter_dict["labels"] = {"name": {"eq": label}}
-    variables: dict[str, object] = {"filter": filter_dict}
-    if include_archived:
-        variables["includeArchived"] = True
-    for issue in _paginate("Issues", variables, IssuesData, lambda data: data.issues):
-        _emit({
-            "id": issue.id,
-            "identifier": issue.identifier,
-            "title": issue.title,
-            "state": issue.state.name,
-            "state_type": issue.state.type,
-            "labels": [label.name for label in issue.labels.nodes],
-            "project": issue.project.name if issue.project else None,
-            "created_at": issue.created_at,
-            "archived_at": issue.archived_at,
-            "url": issue.url,
-        })
+    skip_types = {"completed"}
+    if not include_canceled:
+        skip_types.add("canceled")
 
+    group_labels: set[str] | None = None
+    if require_label_parent is not None:
+        group_labels = _resolve_label_group(require_label_parent)
 
-@app.command(name="get-issue")
-def get_issue(
-    issue_id: Annotated[str, typer.Option("--id", help="Issue id or identifier, e.g. GOV-21")],
-) -> None:
-    issue = graphql("Issue", {"id": issue_id}, IssueDetailData).issue
-    _emit({
-        "identifier": issue.identifier,
-        "title": issue.title,
-        "state": issue.state.name,
-        "team": issue.team.key if issue.team else None,
-        "project": issue.project.name if issue.project else None,
-        "created_at": issue.created_at,
-        "archived_at": issue.archived_at,
-        "url": issue.url,
-        "description": issue.description,
-        "attachments": [
-            {
-                "title": attachment.title,
-                "subtitle": attachment.subtitle,
-                "url": attachment.url,
-                "metadata": attachment.metadata,
-            }
-            for attachment in issue.attachments.nodes
-        ],
-    })
+    repo_urls, default_repository = _discover_repo_urls() if fix_paths else ({}, None)
 
+    offenders = 0
+    open_bodies: list[str] = []
+    query = build_list_query("issues", ISSUE_LIST_FIELDS, filter_type="IssueFilter", paginated=True, archive_aware=True)
+    for issue in _paginate(query, {"filter": _team_filter(team)}, IssuesData, lambda data: data.issues):
+        if issue.state.type in skip_types:
+            continue
 
-@app.command(name="list-relations")
-def list_relations(
-    team: Annotated[str | None, typer.Option("--team", help="Team key to filter by, e.g. PLE")] = None,
-) -> None:
-    for issue in _paginate(
-        "IssueRelations", {"filter": _team_filter(team)}, IssueRelationsData, lambda data: data.issues
-    ):
-        for relation in issue.relations.nodes:
-            if relation.related_issue is None:
-                continue
+        issue_body, violations = _lint_issue(
+            issue, group_labels, require_label_parent, fix_paths, repo_urls, default_repository
+        )
+        open_bodies.append(issue_body)
+        if violations:
+            offenders += 1
+            _emit({"identifier": issue.identifier, "title": issue.title, "violations": violations})
 
-            _emit({"source": issue.identifier, "target": relation.related_issue.identifier, "type": relation.type})
+    if design_orphans:
+        for name in _orphaned_design_docs(open_bodies):
+            offenders += 1
+            _emit({"design_orphan": f"design/{name}", "violations": ["no open Linear ticket links this design doc"]})
+
+    if offenders:
+        raise typer.Exit(1)
 
 
 @app.command(name="find-references")
@@ -175,352 +171,75 @@ def find_references(
                 })
 
     if scan_linear:
-        for issue in _paginate("Issues", {}, IssuesData, lambda data: data.issues):
+        query = build_list_query("issues", ISSUE_LIST_FIELDS, filter_type="IssueFilter", paginated=True)
+        for issue in _paginate(query, {}, IssuesData, lambda data: data.issues):
             if boundary.search(issue.description or "") or boundary.search(issue.title):
                 _emit({"source": issue.identifier, "line": 0, "context": "ticket body"})
 
 
-@app.command(name="list-projects")
-def list_projects() -> None:
-    for project in _paginate("Projects", {}, ProjectsData, lambda data: data.projects):
-        _emit({"id": project.id, "name": project.name, "state": project.state, "url": project.url})
-
-
-@app.command(name="list-teams")
-def list_teams() -> None:
-    teams = graphql("Teams", {}, TeamsData).teams.nodes
-    for team in sorted(teams, key=lambda team: team.key):
-        _emit({"id": team.id, "key": team.key, "name": team.name})
-
-
-@app.command(name="list-workflow-states")
-def list_workflow_states(
-    team: Annotated[str, typer.Option("--team", help="Team key, e.g. GOV")],
-) -> None:
-    states = graphql("WorkflowStates", {"filter": _team_filter(team)}, WorkflowStatesData).workflow_states.nodes
-    for state in states:
-        _emit({"id": state.id, "name": state.name, "type": state.type})
-
-
-@app.command(name="create-team")
-def create_team(
-    name: Annotated[str, typer.Option("--name", help="Team display name")],
-    key: Annotated[str, typer.Option("--key", help="Team key, e.g. GOV")],
-    description: Annotated[str | None, typer.Option("--description", help="Optional team description")] = None,
-) -> None:
-    fields: dict[str, object] = {"name": name, "key": key}
-    if description is not None:
-        fields["description"] = description
-
-    payload = graphql("CreateTeam", {"input": fields}, TeamCreateData).team_create
-    team = _require(payload.success, payload.team, f"Failed to create team {name!r}")
-    _emit({"id": team.id, "key": team.key, "name": team.name})
-
-
-@app.command(name="update-team")
-def update_team(
-    team_id: Annotated[str, typer.Option("--id", help="Team id to update")],
-    name: Annotated[str | None, typer.Option("--name", help="New team display name")] = None,
-    description: Annotated[str | None, typer.Option("--description", help="New team description")] = None,
-) -> None:
-    fields: dict[str, object] = {}
-    if name is not None:
-        fields["name"] = name
-    if description is not None:
-        fields["description"] = description
-
-    _require_fields(fields, "Nothing to update; pass --name and/or --description")
-
-    payload = graphql("UpdateTeam", {"id": team_id, "input": fields}, TeamUpdateData).team_update
-    team = _require(payload.success, payload.team, f"Failed to update team {team_id!r}")
-    _emit({"id": team.id, "key": team.key, "name": team.name})
-
-
-@app.command(name="create-workflow-state")
-def create_workflow_state(
-    team: Annotated[str, typer.Option("--team", help="Team key, e.g. GOV")],
-    name: Annotated[str, typer.Option("--name", help="State display name")],
-    state_type: Annotated[
-        str,
-        typer.Option("--type", help="Linear state type: backlog, unstarted, started, completed, canceled"),
-    ],
-    color: Annotated[str, typer.Option("--color", help="Hex color, e.g. #eb5757")],
-    description: Annotated[str | None, typer.Option("--description", help="Optional state description")] = None,
-    position: Annotated[float | None, typer.Option("--position", help="Position (ordering)")] = None,
-) -> None:
-    fields: dict[str, object] = {
-        "teamId": _resolve_team_id(team),
-        "name": name,
-        "type": state_type,
-        "color": color,
-    }
-    if description is not None:
-        fields["description"] = description
-    if position is not None:
-        fields["position"] = position
-
-    payload = graphql("CreateWorkflowState", {"input": fields}, WorkflowStateCreateData).workflow_state_create
-    state = _require(payload.success, payload.workflow_state, f"Failed to create workflow state {name!r}")
-    _emit({"id": state.id, "name": state.name, "type": state.type})
-
-
-@app.command(name="archive-workflow-state")
-def archive_workflow_state(
-    state_id: Annotated[str, typer.Option("--id", help="Workflow state id to archive")],
-) -> None:
-    payload = graphql("ArchiveWorkflowState", {"id": state_id}, WorkflowStateArchiveData).workflow_state_archive
-    _require_ok(payload.success, f"Failed to archive workflow state {state_id!r}")
-    _emit({"id": state_id, "archived": True})
-
-
-@app.command(name="snapshot")
-def snapshot(
-    issue: Annotated[
-        list[str] | None,
-        typer.Option("--issue", help="Issue identifier to include (repeatable), e.g. GOV-5"),
-    ] = None,
-    label: Annotated[
-        str | None, typer.Option("--label", help="Label name; snapshot every issue carrying this label")
-    ] = None,
-) -> None:
-    if issue is not None and label is not None:
-        _fail("Pass --issue or --label, not both.")
-
-    if issue is not None:
-        nodes = [graphql("IssueSnapshotById", {"id": identifier}, IssueSnapshotByIdData).issue for identifier in issue]
-    elif label is not None:
-        nodes = list(
-            _paginate(
-                "IssueSnapshot", {"filter": label_snapshot_filter(label)}, IssueSnapshotData, lambda data: data.issues
-            )
-        )
-    else:
-        _fail("Pass --issue (repeatable) or --label to select issues to snapshot.")
-    nodes.sort(key=lambda node: identifier_sort_key(node.identifier))
-
-    typer.echo(
-        json.dumps(
-            {
-                "captured_at": datetime.now(UTC).isoformat(),
-                "linear_profile": _resolved_profile_name(),
-                "issues": [_snapshot_issue_dict(node) for node in nodes],
-            },
-            indent=2,
-        )
-    )
-
-
-@app.command(name="snapshot-workspace")
-def snapshot_workspace() -> None:
-    captured_at = datetime.now(UTC).isoformat()
-    profile_name = _resolved_profile_name()
-
-    teams = graphql("Teams", {}, TeamsData).teams.nodes
-    projects = list(_paginate("Projects", {}, ProjectsData, lambda data: data.projects))
-    labels = graphql("Labels", {}, LabelsData).issue_labels.nodes
-    workflow_states = graphql("WorkflowStates", {"filter": {}}, WorkflowStatesData).workflow_states.nodes
-    issues = list(_paginate("IssueSnapshot", {"includeArchived": True}, IssueSnapshotData, lambda data: data.issues))
-
-    record = {
-        "captured_at": captured_at,
-        "linear_profile": profile_name,
-        "teams": [{"id": team.id, "key": team.key, "name": team.name} for team in teams],
-        "workflow_states": [{"id": state.id, "name": state.name, "type": state.type} for state in workflow_states],
-        "projects": [
-            {"id": project.id, "name": project.name, "state": project.state, "url": project.url} for project in projects
-        ],
-        "labels": [
-            {
-                "id": label.id,
-                "name": label.name,
-                "color": label.color,
-                "is_group": label.is_group,
-                "parent_id": label.parent.id if label.parent else None,
-            }
-            for label in labels
-        ],
-        "issues": [
-            _snapshot_issue_dict(node) for node in sorted(issues, key=lambda node: identifier_sort_key(node.identifier))
-        ],
-    }
-    typer.echo(json.dumps(record, indent=2))
-
-
-@app.command(name="lint")
-def lint(
+@issue_app.command(name="list")
+def issue_list(
     team: Annotated[str | None, typer.Option("--team", help="Team key to filter by, e.g. PLE")] = None,
-    design_orphans: Annotated[
-        bool, typer.Option("--design-orphans", help="Also flag design/ docs that no open ticket links")
-    ] = False,
-    include_canceled: Annotated[bool, typer.Option("--include-canceled", help="Also lint canceled issues")] = False,
-    require_label_parent: Annotated[
-        str | None,
-        typer.Option(
-            "--require-label-parent", help="Require every ticket to carry a label in this parent group, e.g. repo"
-        ),
-    ] = None,
-    fix_paths: Annotated[
-        bool,
-        typer.Option("--fix-paths", help="Auto-fix bare repo-relative paths in ticket bodies to full GitHub blob URLs"),
+    label: Annotated[str | None, typer.Option("--label", help="Label name to filter by")] = None,
+    include_archived: Annotated[
+        bool, typer.Option("--include-archived", help="Include archived issues in results")
     ] = False,
 ) -> None:
-    skip_types = {"completed"}
-    if not include_canceled:
-        skip_types.add("canceled")
-
-    group_labels: set[str] | None = None
-    if require_label_parent is not None:
-        group_labels = _resolve_label_group(require_label_parent)
-
-    repo_urls, default_repository = _discover_repo_urls() if fix_paths else ({}, None)
-
-    offenders = 0
-    open_bodies: list[str] = []
-    for issue in _paginate("Issues", {"filter": _team_filter(team)}, IssuesData, lambda data: data.issues):
-        if issue.state.type in skip_types:
-            continue
-
-        issue_body, violations = _lint_issue(
-            issue, group_labels, require_label_parent, fix_paths, repo_urls, default_repository
-        )
-        open_bodies.append(issue_body)
-        if violations:
-            offenders += 1
-            _emit({"identifier": issue.identifier, "title": issue.title, "violations": violations})
-
-    if design_orphans:
-        for name in _orphaned_design_docs(open_bodies):
-            offenders += 1
-            _emit({"design_orphan": f"design/{name}", "violations": ["no open Linear ticket links this design doc"]})
-
-    if offenders:
-        raise typer.Exit(1)
-
-
-@app.command(name="ensure-label")
-def ensure_label(
-    name: Annotated[str, typer.Option("--name", help="Leaf label name")],
-    parent: Annotated[str | None, typer.Option("--parent", help="Parent label-group name to nest under")] = None,
-) -> None:
-    labels = graphql("Labels", {}, LabelsData).issue_labels.nodes
-    parent_id = _ensure_label_record(labels, parent, None, is_group=True) if parent is not None else None
-    leaf_id = _ensure_label_record(labels, name, parent_id, is_group=False)
-    _emit({"id": leaf_id})
-
-
-@app.command(name="list-labels")
-def list_labels() -> None:
-    labels = graphql("Labels", {}, LabelsData).issue_labels.nodes
-    names_by_id = {label.id: label.name for label in labels}
-    for label in labels:
-        parent_name = names_by_id.get(label.parent.id) if label.parent else None
+    filter_dict: dict[str, object] = _team_filter(team)
+    if label is not None:
+        filter_dict["labels"] = {"name": {"eq": label}}
+    variables: dict[str, object] = {"filter": filter_dict}
+    if include_archived:
+        variables["includeArchived"] = True
+    query = build_list_query("issues", ISSUE_LIST_FIELDS, filter_type="IssueFilter", paginated=True, archive_aware=True)
+    for issue in _paginate(query, variables, IssuesData, lambda data: data.issues):
         _emit({
-            "id": label.id,
-            "name": label.name,
-            "color": label.color,
-            "is_group": label.is_group,
-            "parent": parent_name,
+            "id": issue.id,
+            "identifier": issue.identifier,
+            "title": issue.title,
+            "state": issue.state.name,
+            "state_type": issue.state.type,
+            "labels": [label.name for label in issue.labels.nodes],
+            "project": issue.project.name if issue.project else None,
+            "created_at": issue.created_at,
+            "archived_at": issue.archived_at,
+            "url": issue.url,
         })
 
 
-@app.command(name="update-label")
-def update_label(
-    label_id: Annotated[str, typer.Option("--id", help="Label id to update")],
-    name: Annotated[str | None, typer.Option("--name", help="New label name")] = None,
-    parent: Annotated[str | None, typer.Option("--parent", help="Parent group name to reparent under")] = None,
-    color: Annotated[str | None, typer.Option("--color", help="New label color as a hex string, e.g. #eb5757")] = None,
+@issue_app.command(name="get")
+def issue_get(
+    issue_id: Annotated[str, typer.Option("--id", help="Issue id or identifier, e.g. GOV-21")],
 ) -> None:
-    fields: dict[str, object] = {}
-    if name is not None:
-        fields["name"] = name
-    if color is not None:
-        fields["color"] = color
-    if parent is not None:
-        labels = graphql("Labels", {}, LabelsData).issue_labels.nodes
-        groups = [node for node in labels if node.is_group and node.name == parent]
-        if len(groups) != 1:
-            _fail(f"Expected exactly one group named {parent!r}, found {len(groups)}")
-
-        fields["parentId"] = groups[0].id
-
-    _require_fields(fields, "Nothing to update; pass --name, --parent, and/or --color")
-
-    payload = graphql("UpdateLabel", {"id": label_id, "input": fields}, IssueLabelUpdateData).issue_label_update
-    label = _require(payload.success, payload.issue_label, f"Failed to update label {label_id!r}")
-    _emit({"id": label.id, "name": label.name})
-
-
-@app.command(name="delete-label")
-def delete_label(
-    label_id: Annotated[str, typer.Option("--id", help="Label id to delete")],
-) -> None:
-    payload = graphql("DeleteLabel", {"id": label_id}, IssueLabelDeleteData).issue_label_delete
-    _require_ok(payload.success, f"Failed to delete label {label_id!r}")
-    _emit({"id": label_id, "deleted": True})
+    query = build_node_query("issue", ISSUE_DETAIL_FIELDS)
+    issue = IssueDetailData.model_validate(graphql(query, {"id": issue_id})).issue
+    _emit({
+        "identifier": issue.identifier,
+        "title": issue.title,
+        "state": issue.state.name,
+        "team": issue.team.key if issue.team else None,
+        "project": issue.project.name if issue.project else None,
+        "created_at": issue.created_at,
+        "archived_at": issue.archived_at,
+        "url": issue.url,
+        "description": issue.description,
+        "attachments": [
+            {
+                "title": attachment.title,
+                "subtitle": attachment.subtitle,
+                "url": attachment.url,
+                "metadata": attachment.metadata,
+            }
+            for attachment in issue.attachments.nodes
+        ],
+    })
 
 
-@app.command(name="create-project", help="Reads the project content (markdown body) from stdin.")
-def create_project(
-    name: Annotated[str, typer.Option("--name", help="Project name")],
-    team: Annotated[str, typer.Option("--team", help="Team key the project belongs to, e.g. PLE")],
-    summary: Annotated[str, typer.Option("--summary", help="One-line project description")] = "",
-) -> None:
-    content = _read_stdin()
-    fields: dict[str, object] = {"name": name, "teamIds": [_resolve_team_id(team)]}
-    if summary:
-        fields["description"] = summary
-    if content.strip():
-        fields["content"] = content
-
-    payload = graphql("CreateProject", {"input": fields}, ProjectCreateData).project_create
-    project = _require(payload.success, payload.project, f"Failed to create project {name!r}")
-    _emit({"id": project.id, "url": project.url})
-
-
-@app.command(name="update-project", help="Reads the new project content (markdown body) from stdin if any is piped in.")
-def update_project(
-    project_id: Annotated[str, typer.Option("--id", help="Project id to update")],
-    name: Annotated[str | None, typer.Option("--name", help="New project name")] = None,
-    summary: Annotated[str | None, typer.Option("--summary", help="New one-line description")] = None,
-    team: Annotated[
-        list[str] | None,
-        typer.Option("--team", help="Team key for the project (repeatable); replaces the project's team set"),
-    ] = None,
-) -> None:
-    content = _read_stdin()
-    fields: dict[str, object] = {}
-    if name is not None:
-        fields["name"] = name
-    if summary is not None:
-        fields["description"] = summary
-    if content.strip():
-        fields["content"] = content
-    if team is not None:
-        if len(team) == 0:
-            _fail("--team requires at least one team key")
-        fields["teamIds"] = [_resolve_team_id(key) for key in team]
-
-    _require_fields(fields, "Nothing to update; pass --team, --name, --summary, or a body on stdin")
-
-    payload = graphql("UpdateProject", {"id": project_id, "input": fields}, ProjectUpdateData).project_update
-    project = _require(payload.success, payload.project, f"Failed to update project {project_id!r}")
-    _emit({"id": project.id, "url": project.url})
-
-
-@app.command(name="delete-project")
-def delete_project(
-    project_id: Annotated[str, typer.Option("--id", help="Project id to delete")],
-) -> None:
-    payload = graphql("DeleteProject", {"id": project_id}, ProjectDeleteData).project_delete
-    _require_ok(payload.success, f"Failed to delete project {project_id!r}")
-    _emit({"id": project_id, "deleted": True})
-
-
-@app.command(
-    name="create-issue",
+@issue_app.command(
+    name="create",
     help="Reads the issue description (markdown body) from stdin. Required — must match the Why/Done-when/Links template.",
 )
-def create_issue(
+def issue_create(
     title: Annotated[str, typer.Option("--title", help="Issue title")],
     team: Annotated[str, typer.Option("--team", help="Team key, e.g. PLE")],
     project: Annotated[str | None, typer.Option("--project", help="Project id to file the issue under")] = None,
@@ -539,16 +258,14 @@ def create_issue(
     if priority is not None:
         fields["priority"] = priority
 
-    payload = graphql("CreateIssue", {"input": fields}, IssueCreateData).issue_create
-    issue = _require(payload.success, payload.issue, f"Failed to create issue {title!r}")
-    _emit({"id": issue.id, "identifier": issue.identifier, "url": issue.url})
+    _emit(mutate("issue", "Create", {"input": fields}))
 
 
-@app.command(
-    name="update-issue",
+@issue_app.command(
+    name="update",
     help="Reads the new issue description (markdown body) from stdin if any is piped in. Piped bodies must match the Why/Done-when/Links template.",
 )
-def update_issue(
+def issue_update(
     issue_id: Annotated[str, typer.Option("--id", help="Issue id or identifier, e.g. GOV-21")],
     title: Annotated[str | None, typer.Option("--title", help="New issue title")] = None,
     project: Annotated[str | None, typer.Option("--project", help="Project id to move the issue under")] = None,
@@ -581,8 +298,9 @@ def update_issue(
     if label is not None and add_label is None and remove_label is None:
         fields["labelIds"] = _resolve_label_ids(label)
     elif add_label is not None or remove_label is not None:
-        issue = graphql("Issue", {"id": issue_id}, IssueDetailData).issue
-        current_ids = {ref.id for ref in issue.labels.nodes}
+        detail_query = build_node_query("issue", ISSUE_DETAIL_FIELDS)
+        current = IssueDetailData.model_validate(graphql(detail_query, {"id": issue_id})).issue
+        current_ids = {ref.id for ref in current.labels.nodes}
         add_ids: set[str] = set(_resolve_label_ids(add_label)) if add_label else set()
         remove_ids: set[str] = set(_resolve_label_ids(remove_label)) if remove_label else set()
         fields["labelIds"] = list(current_ids | add_ids - remove_ids)
@@ -601,51 +319,341 @@ def update_issue(
         "Nothing to update; pass --team, --title, --label, --add-label, --remove-label, --state, --priority, or a body on stdin",
     )
 
-    payload = graphql("UpdateIssue", {"id": issue_id, "input": fields}, IssueUpdateData).issue_update
-    issue = _require(payload.success, payload.issue, f"Failed to update issue {issue_id!r}")
-    _emit({"id": issue.id, "identifier": issue.identifier, "url": issue.url})
+    _emit(mutate("issue", "Update", {"id": issue_id, "input": fields}))
 
 
-@app.command()
-def link(
+@issue_app.command(name="unarchive")
+def issue_unarchive(
+    issue_id: Annotated[str, typer.Option("--id", help="Issue id or identifier to unarchive")],
+) -> None:
+    _emit(mutate("issue", "Unarchive", {"id": issue_id}))
+
+
+@issue_app.command(name="snapshot")
+def issue_snapshot(
+    issue: Annotated[
+        list[str] | None,
+        typer.Option("--issue", help="Issue identifier to include (repeatable), e.g. GOV-5"),
+    ] = None,
+    label: Annotated[
+        str | None, typer.Option("--label", help="Label name; snapshot every issue carrying this label")
+    ] = None,
+) -> None:
+    if issue is not None and label is not None:
+        _fail("Pass --issue or --label, not both.")
+
+    if issue is not None:
+        node_query = build_node_query("issue", ISSUE_SNAPSHOT_FIELDS)
+        nodes = [
+            IssueSnapshotByIdData.model_validate(graphql(node_query, {"id": identifier})).issue for identifier in issue
+        ]
+    elif label is not None:
+        list_query = build_list_query("issues", ISSUE_SNAPSHOT_FIELDS, filter_type="IssueFilter", paginated=True)
+        nodes = list(
+            _paginate(list_query, {"filter": label_snapshot_filter(label)}, IssueSnapshotData, lambda data: data.issues)
+        )
+    else:
+        _fail("Pass --issue (repeatable) or --label to select issues to snapshot.")
+    nodes.sort(key=lambda node: identifier_sort_key(node.identifier))
+
+    typer.echo(
+        json.dumps(
+            {
+                "captured_at": datetime.now(UTC).isoformat(),
+                "linear_profile": _resolved_profile_name(),
+                "issues": [_snapshot_issue_dict(node) for node in nodes],
+            },
+            indent=2,
+        )
+    )
+
+
+@relation_app.command(name="list")
+def relation_list(
+    team: Annotated[str | None, typer.Option("--team", help="Team key to filter by, e.g. PLE")] = None,
+) -> None:
+    query = build_list_query("issues", ISSUE_RELATIONS_FIELDS, filter_type="IssueFilter", paginated=True)
+    for issue_node in _paginate(query, {"filter": _team_filter(team)}, IssueRelationsData, lambda data: data.issues):
+        for relation in issue_node.relations.nodes:
+            if relation.related_issue is None:
+                continue
+
+            _emit({"source": issue_node.identifier, "target": relation.related_issue.identifier, "type": relation.type})
+
+
+@relation_app.command(name="create")
+def relation_create(
     blocker: Annotated[str, typer.Option("--blocker", help="Issue id that does the blocking")],
     blocked: Annotated[str, typer.Option("--blocked", help="Issue id that is blocked")],
 ) -> None:
     fields: dict[str, object] = {"issueId": blocker, "relatedIssueId": blocked, "type": "blocks"}
-    payload = graphql("CreateRelation", {"input": fields}, IssueRelationCreateData).issue_relation_create
-    _require_ok(payload.success, "Failed to create blocking relation")
+    mutate("issueRelation", "Create", {"input": fields})
     _emit({"blocker": blocker, "blocked": blocked, "type": "blocks"})
 
 
-@app.command(help="Reads the comment body (markdown) from stdin. Required.")
-def comment(
+@comment_app.command(name="create", help="Reads the comment body (markdown) from stdin. Required.")
+def comment_create(
     issue_id: Annotated[str, typer.Option("--issue", help="Issue id to comment on")],
 ) -> None:
     body = _read_stdin()
     if not body.strip():
         _fail("No comment body on stdin")
 
-    payload = graphql("CreateComment", {"input": {"issueId": issue_id, "body": body}}, CommentCreateData).comment_create
-    created = _require(payload.success, payload.comment, f"Failed to comment on issue {issue_id!r}")
-    _emit({"id": created.id, "url": created.url})
+    _emit(mutate("comment", "Create", {"input": {"issueId": issue_id, "body": body}}))
 
 
-@app.command(name="delete-comment")
-def delete_comment(
+@comment_app.command(name="delete")
+def comment_delete(
     comment_id: Annotated[str, typer.Option("--id", help="Comment id to delete")],
 ) -> None:
-    payload = graphql("DeleteComment", {"id": comment_id}, CommentDeleteData).comment_delete
-    _require_ok(payload.success, f"Failed to delete comment {comment_id!r}")
-    _emit({"id": comment_id, "deleted": True})
+    _emit(mutate("comment", "Delete", {"id": comment_id}))
 
 
-@app.command(name="unarchive-issue")
-def unarchive_issue(
-    issue_id: Annotated[str, typer.Option("--id", help="Issue id or identifier to unarchive")],
+@project_app.command(name="list")
+def project_list() -> None:
+    query = build_list_query("projects", PROJECT_FIELDS, paginated=True)
+    for project in _paginate(query, {}, ProjectsData, lambda data: data.projects):
+        _emit({"id": project.id, "name": project.name, "state": project.state, "url": project.url})
+
+
+@project_app.command(name="create", help="Reads the project content (markdown body) from stdin.")
+def project_create(
+    name: Annotated[str, typer.Option("--name", help="Project name")],
+    team: Annotated[str, typer.Option("--team", help="Team key the project belongs to, e.g. PLE")],
+    summary: Annotated[str, typer.Option("--summary", help="One-line project description")] = "",
 ) -> None:
-    payload = graphql("IssueUnarchive", {"id": issue_id}, IssueUnarchiveData).issue_unarchive
-    _require_ok(payload.success, f"Failed to unarchive issue {issue_id!r}")
-    _emit({"id": issue_id, "unarchived": True})
+    content = _read_stdin()
+    fields: dict[str, object] = {"name": name, "teamIds": [_resolve_team_id(team)]}
+    if summary:
+        fields["description"] = summary
+    if content.strip():
+        fields["content"] = content
+
+    _emit(mutate("project", "Create", {"input": fields}))
+
+
+@project_app.command(name="update", help="Reads the new project content (markdown body) from stdin if any is piped in.")
+def project_update(
+    project_id: Annotated[str, typer.Option("--id", help="Project id to update")],
+    name: Annotated[str | None, typer.Option("--name", help="New project name")] = None,
+    summary: Annotated[str | None, typer.Option("--summary", help="New one-line description")] = None,
+    team: Annotated[
+        list[str] | None,
+        typer.Option("--team", help="Team key for the project (repeatable); replaces the project's team set"),
+    ] = None,
+) -> None:
+    content = _read_stdin()
+    fields: dict[str, object] = {}
+    if name is not None:
+        fields["name"] = name
+    if summary is not None:
+        fields["description"] = summary
+    if content.strip():
+        fields["content"] = content
+    if team is not None:
+        if len(team) == 0:
+            _fail("--team requires at least one team key")
+        fields["teamIds"] = [_resolve_team_id(key) for key in team]
+
+    _require_fields(fields, "Nothing to update; pass --team, --name, --summary, or a body on stdin")
+
+    _emit(mutate("project", "Update", {"id": project_id, "input": fields}))
+
+
+@project_app.command(name="delete")
+def project_delete(
+    project_id: Annotated[str, typer.Option("--id", help="Project id to delete")],
+) -> None:
+    _emit(mutate("project", "Delete", {"id": project_id}))
+
+
+@team_app.command(name="list")
+def team_list() -> None:
+    query = build_list_query("teams", TEAM_FIELDS)
+    teams = TeamsData.model_validate(graphql(query, {})).teams.nodes
+    for team in sorted(teams, key=lambda team: team.key):
+        _emit({"id": team.id, "key": team.key, "name": team.name})
+
+
+@team_app.command(name="create")
+def team_create(
+    name: Annotated[str, typer.Option("--name", help="Team display name")],
+    key: Annotated[str, typer.Option("--key", help="Team key, e.g. GOV")],
+    description: Annotated[str | None, typer.Option("--description", help="Optional team description")] = None,
+) -> None:
+    fields: dict[str, object] = {"name": name, "key": key}
+    if description is not None:
+        fields["description"] = description
+
+    _emit(mutate("team", "Create", {"input": fields}))
+
+
+@team_app.command(name="update")
+def team_update(
+    team_id: Annotated[str, typer.Option("--id", help="Team id to update")],
+    name: Annotated[str | None, typer.Option("--name", help="New team display name")] = None,
+    description: Annotated[str | None, typer.Option("--description", help="New team description")] = None,
+) -> None:
+    fields: dict[str, object] = {}
+    if name is not None:
+        fields["name"] = name
+    if description is not None:
+        fields["description"] = description
+
+    _require_fields(fields, "Nothing to update; pass --name and/or --description")
+
+    _emit(mutate("team", "Update", {"id": team_id, "input": fields}))
+
+
+@workflow_state_app.command(name="list")
+def workflow_state_list(
+    team: Annotated[str, typer.Option("--team", help="Team key, e.g. GOV")],
+) -> None:
+    query = build_list_query("workflowStates", WORKFLOW_STATE_FIELDS, filter_type="WorkflowStateFilter")
+    states = WorkflowStatesData.model_validate(graphql(query, {"filter": _team_filter(team)})).workflow_states.nodes
+    for state in states:
+        _emit({"id": state.id, "name": state.name, "type": state.type})
+
+
+@workflow_state_app.command(name="create")
+def workflow_state_create(
+    team: Annotated[str, typer.Option("--team", help="Team key, e.g. GOV")],
+    name: Annotated[str, typer.Option("--name", help="State display name")],
+    state_type: Annotated[
+        str,
+        typer.Option("--type", help="Linear state type: backlog, unstarted, started, completed, canceled"),
+    ],
+    color: Annotated[str, typer.Option("--color", help="Hex color, e.g. #eb5757")],
+    description: Annotated[str | None, typer.Option("--description", help="Optional state description")] = None,
+    position: Annotated[float | None, typer.Option("--position", help="Position (ordering)")] = None,
+) -> None:
+    fields: dict[str, object] = {
+        "teamId": _resolve_team_id(team),
+        "name": name,
+        "type": state_type,
+        "color": color,
+    }
+    if description is not None:
+        fields["description"] = description
+    if position is not None:
+        fields["position"] = position
+
+    _emit(mutate("workflowState", "Create", {"input": fields}))
+
+
+@workflow_state_app.command(name="archive")
+def workflow_state_archive(
+    state_id: Annotated[str, typer.Option("--id", help="Workflow state id to archive")],
+) -> None:
+    _emit(mutate("workflowState", "Archive", {"id": state_id}))
+
+
+@label_app.command(name="list")
+def label_list() -> None:
+    query = build_list_query("issueLabels", LABEL_FIELDS)
+    labels = LabelsData.model_validate(graphql(query, {})).issue_labels.nodes
+    names_by_id = {label.id: label.name for label in labels}
+    for label in labels:
+        parent_name = names_by_id.get(label.parent.id) if label.parent else None
+        _emit({
+            "id": label.id,
+            "name": label.name,
+            "color": label.color,
+            "is_group": label.is_group,
+            "parent": parent_name,
+        })
+
+
+@label_app.command(name="ensure")
+def label_ensure(
+    name: Annotated[str, typer.Option("--name", help="Leaf label name")],
+    parent: Annotated[str | None, typer.Option("--parent", help="Parent label-group name to nest under")] = None,
+) -> None:
+    query = build_list_query("issueLabels", LABEL_FIELDS)
+    labels = LabelsData.model_validate(graphql(query, {})).issue_labels.nodes
+    parent_id = _ensure_label_record(labels, parent, None, is_group=True) if parent is not None else None
+    leaf_id = _ensure_label_record(labels, name, parent_id, is_group=False)
+    _emit({"id": leaf_id})
+
+
+@label_app.command(name="update")
+def label_update(
+    label_id: Annotated[str, typer.Option("--id", help="Label id to update")],
+    name: Annotated[str | None, typer.Option("--name", help="New label name")] = None,
+    parent: Annotated[str | None, typer.Option("--parent", help="Parent group name to reparent under")] = None,
+    color: Annotated[str | None, typer.Option("--color", help="New label color as a hex string, e.g. #eb5757")] = None,
+) -> None:
+    fields: dict[str, object] = {}
+    if name is not None:
+        fields["name"] = name
+    if color is not None:
+        fields["color"] = color
+    if parent is not None:
+        query = build_list_query("issueLabels", LABEL_FIELDS)
+        labels = LabelsData.model_validate(graphql(query, {})).issue_labels.nodes
+        groups = [node for node in labels if node.is_group and node.name == parent]
+        if len(groups) != 1:
+            _fail(f"Expected exactly one group named {parent!r}, found {len(groups)}")
+
+        fields["parentId"] = groups[0].id
+
+    _require_fields(fields, "Nothing to update; pass --name, --parent, and/or --color")
+
+    _emit(mutate("issueLabel", "Update", {"id": label_id, "input": fields}))
+
+
+@label_app.command(name="delete")
+def label_delete(
+    label_id: Annotated[str, typer.Option("--id", help="Label id to delete")],
+) -> None:
+    _emit(mutate("issueLabel", "Delete", {"id": label_id}))
+
+
+@workspace_app.command(name="snapshot")
+def workspace_snapshot() -> None:
+    captured_at = datetime.now(UTC).isoformat()
+    profile_name = _resolved_profile_name()
+
+    teams_query = build_list_query("teams", TEAM_FIELDS)
+    teams = TeamsData.model_validate(graphql(teams_query, {})).teams.nodes
+
+    projects_query = build_list_query("projects", PROJECT_FIELDS, paginated=True)
+    projects = list(_paginate(projects_query, {}, ProjectsData, lambda data: data.projects))
+
+    labels_query = build_list_query("issueLabels", LABEL_FIELDS)
+    labels = LabelsData.model_validate(graphql(labels_query, {})).issue_labels.nodes
+
+    states_query = build_list_query("workflowStates", WORKFLOW_STATE_FIELDS, filter_type="WorkflowStateFilter")
+    workflow_states = WorkflowStatesData.model_validate(graphql(states_query, {"filter": {}})).workflow_states.nodes
+
+    issues_query = build_list_query(
+        "issues", ISSUE_SNAPSHOT_FIELDS, filter_type="IssueFilter", paginated=True, archive_aware=True
+    )
+    issues = list(_paginate(issues_query, {"includeArchived": True}, IssueSnapshotData, lambda data: data.issues))
+
+    record = {
+        "captured_at": captured_at,
+        "linear_profile": profile_name,
+        "teams": [{"id": team.id, "key": team.key, "name": team.name} for team in teams],
+        "workflow_states": [{"id": state.id, "name": state.name, "type": state.type} for state in workflow_states],
+        "projects": [
+            {"id": project.id, "name": project.name, "state": project.state, "url": project.url} for project in projects
+        ],
+        "labels": [
+            {
+                "id": label.id,
+                "name": label.name,
+                "color": label.color,
+                "is_group": label.is_group,
+                "parent_id": label.parent.id if label.parent else None,
+            }
+            for label in labels
+        ],
+        "issues": [
+            _snapshot_issue_dict(node) for node in sorted(issues, key=lambda node: identifier_sort_key(node.identifier))
+        ],
+    }
+    typer.echo(json.dumps(record, indent=2))
 
 
 def _fail(message: str) -> NoReturn:
@@ -666,14 +674,14 @@ def _resolved_profile_name() -> str:
     return resolve_profile_name(_load_config_or_die(), _CliState.profile_override, Path.cwd())
 
 
-def graphql[T: LinearModel](operation: str, variables: dict[str, object], model: type[T]) -> T:
+def graphql(query: str, variables: dict[str, object]) -> dict[str, object]:
     response = httpx.post(
         LINEAR_ENDPOINT,
         headers={
             "Authorization": _load_config_or_die().root[_resolved_profile_name()].api_key,
             "Content-Type": "application/json",
         },
-        json={"query": _OPERATIONS, "operationName": operation, "variables": variables},
+        json={"query": query, "variables": variables},
         timeout=30.0,
     )
     try:
@@ -689,34 +697,51 @@ def graphql[T: LinearModel](operation: str, variables: dict[str, object], model:
     if data is None:
         _fail(f"Linear API returned no data (HTTP {response.status_code})")
 
-    return model.model_validate(data)
+    return _expect_dict(data)
+
+
+_dict_adapter = TypeAdapter(dict[str, object])
+
+
+def _expect_dict(value: object | None) -> dict[str, object]:
+    try:
+        return _dict_adapter.validate_python(value)
+    except ValidationError:
+        _fail("Linear API returned an unexpected response shape")
+
+
+def mutate(noun: str, verb: str, variables: dict[str, object]) -> dict[str, object]:
+    query = build_mutation(noun, verb)
+    data = graphql(query, variables)
+    field = f"{noun}{verb}"
+    result = _expect_dict(data.get(field))
+    if not result.get("success"):
+        _fail(f"Linear API mutation {field} failed")
+
+    if verb in DELETE_VERBS:
+        return {"id": variables["id"], DELETE_VERBS[verb]: True}
+
+    resource = RESOURCES[noun]
+    if not resource.return_fields:
+        return {}
+
+    return _expect_dict(result.get(resource.node))
 
 
 def _paginate[T: LinearModel, NodeT](
-    operation: str,
+    query: str,
     variables: dict[str, object],
     model: type[T],
     select: Callable[[T], Connection[NodeT]],
 ) -> Iterator[NodeT]:
     after: str | None = None
     while True:
-        connection = select(graphql(operation, {**variables, "after": after}, model))
+        connection = select(model.model_validate(graphql(query, {**variables, "after": after})))
         yield from connection.nodes
         if not connection.page_info.has_next_page:
             break
 
         after = connection.page_info.end_cursor
-
-
-def _require[T](success: bool, value: T | None, message: str) -> T:
-    if not success or value is None:
-        _fail(message)
-    return value
-
-
-def _require_ok(success: bool, message: str) -> None:
-    if not success:
-        _fail(message)
 
 
 def _require_fields(fields: dict[str, object], message: str) -> None:
@@ -776,7 +801,7 @@ def _lint_issue(
     if fix_paths and bare_path_violations:
         fixed_body, fixes = fix_bare_paths(body, repo_urls, default_repository)
         if fixes:
-            graphql("UpdateIssue", {"id": issue.id, "input": {"description": fixed_body}}, IssueUpdateData)
+            mutate("issue", "Update", {"id": issue.id, "input": {"description": fixed_body}})
             _emit({"identifier": issue.identifier, "fixed_paths": fixes})
             body = fixed_body
             violations = _issue_violations(issue.title, body, label_names, group_labels, group_name)
@@ -801,7 +826,8 @@ def _orphaned_design_docs(open_bodies: list[str]) -> list[str]:
 
 
 def _resolve_team_id(key: str) -> str:
-    teams = graphql("Teams", {}, TeamsData).teams.nodes
+    query = build_list_query("teams", TEAM_FIELDS)
+    teams = TeamsData.model_validate(graphql(query, {})).teams.nodes
     team = next((team for team in teams if team.key == key), None)
     if team is None:
         available = ", ".join(sorted(team.key for team in teams))
@@ -810,7 +836,8 @@ def _resolve_team_id(key: str) -> str:
 
 
 def _resolve_label_group(group_name: str) -> set[str]:
-    all_labels = graphql("Labels", {}, LabelsData).issue_labels.nodes
+    query = build_list_query("issueLabels", LABEL_FIELDS)
+    all_labels = LabelsData.model_validate(graphql(query, {})).issue_labels.nodes
     names_by_id = {label.id: label.name for label in all_labels}
     group_labels = {
         label.name for label in all_labels if label.parent and names_by_id.get(label.parent.id) == group_name
@@ -824,7 +851,8 @@ def _resolve_label_group(group_name: str) -> set[str]:
 
 
 def _resolve_state_id(state: str, team: str) -> str:
-    states = graphql("WorkflowStates", {"filter": _team_filter(team)}, WorkflowStatesData).workflow_states.nodes
+    query = build_list_query("workflowStates", WORKFLOW_STATE_FIELDS, filter_type="WorkflowStateFilter")
+    states = WorkflowStatesData.model_validate(graphql(query, {"filter": _team_filter(team)})).workflow_states.nodes
     matches = [candidate for candidate in states if candidate.name.casefold() == state.casefold()]
     if len(matches) != 1:
         available = ", ".join(sorted(candidate.name for candidate in states))
@@ -833,7 +861,8 @@ def _resolve_state_id(state: str, team: str) -> str:
 
 
 def _resolve_label_ids(labels: list[str]) -> list[str]:
-    all_labels = graphql("Labels", {}, LabelsData).issue_labels.nodes
+    query = build_list_query("issueLabels", LABEL_FIELDS)
+    all_labels = LabelsData.model_validate(graphql(query, {})).issue_labels.nodes
     name_to_id = {label.name: label.id for label in all_labels}
     resolved: list[str] = []
     for label in labels:
@@ -867,8 +896,11 @@ def _ensure_label_record(labels: list[LabelNode], name: str, parent_id: str | No
     if parent_id is not None:
         fields["parentId"] = parent_id
 
-    payload = graphql("CreateLabel", {"input": fields}, IssueLabelCreateData).issue_label_create
-    return _require(payload.success, payload.issue_label, f"Failed to create label {name!r}").id
+    node = mutate("issueLabel", "Create", {"input": fields})
+    node_id = node["id"]
+    if not isinstance(node_id, str):
+        _fail("Linear API returned a non-string id for created label")
+    return node_id
 
 
 def _snapshot_issue_dict(node: IssueSnapshotNode) -> dict[str, object]:
