@@ -665,7 +665,7 @@ def create_issue(
     title: Annotated[str, typer.Option("--title", help="Issue title")],
     team: Annotated[str, typer.Option("--team", help="Team key, e.g. PLE")],
     project: Annotated[str | None, typer.Option("--project", help="Project id to file the issue under")] = None,
-    label: Annotated[list[str] | None, typer.Option("--label", help="Label id to attach (repeatable)")] = None,
+    label: Annotated[list[str] | None, typer.Option("--label", help="Label name or id to attach (repeatable)")] = None,
     priority: Annotated[int | None, typer.Option("--priority", help="Issue priority: 0=none, 1=urgent, 2=high")] = None,
 ) -> None:
     description = _read_stdin()
@@ -676,7 +676,7 @@ def create_issue(
     if project is not None:
         fields["projectId"] = project
     if label:
-        fields["labelIds"] = label
+        fields["labelIds"] = _resolve_label_ids(label)
     if priority is not None:
         fields["priority"] = priority
 
@@ -693,7 +693,7 @@ def update_issue(
     issue_id: Annotated[str, typer.Option("--id", help="Issue id to update")],
     title: Annotated[str | None, typer.Option("--title", help="New issue title")] = None,
     project: Annotated[str | None, typer.Option("--project", help="Project id to move the issue under")] = None,
-    label: Annotated[list[str] | None, typer.Option("--label", help="Replaces the label set (repeatable)")] = None,
+    label: Annotated[list[str] | None, typer.Option("--label", help="Replaces the label set by name or id (repeatable)")] = None,
     state: Annotated[str | None, typer.Option("--state", help="Workflow state name to move the issue to")] = None,
     team: Annotated[
         str | None,
@@ -711,7 +711,7 @@ def update_issue(
     if project is not None:
         fields["projectId"] = project
     if label:
-        fields["labelIds"] = label
+        fields["labelIds"] = _resolve_label_ids(label)
     if team is not None:
         fields["teamId"] = _resolve_team_id(team)
     if state is not None:
@@ -880,6 +880,22 @@ def _resolve_team_id(key: str) -> str:
     available = ", ".join(sorted(team.key for team in teams))
     typer.echo(f"No team with key {key!r}; available keys: {available}", err=True)
     raise typer.Exit(1)
+
+
+def _resolve_label_ids(labels: list[str]) -> list[str]:
+    all_labels = graphql("Labels", {}, LabelsData).issue_labels.nodes
+    name_to_id = {label.name: label.id for label in all_labels}
+    resolved: list[str] = []
+    for label in labels:
+        if label in name_to_id:
+            resolved.append(name_to_id[label])
+        elif len(label) == 36 and label.count("-") == 4:
+            resolved.append(label)
+        else:
+            available = ", ".join(sorted(name_to_id))
+            typer.echo(f"Unknown label {label!r}; available names: {available}", err=True)
+            raise typer.Exit(1)
+    return resolved
 
 
 def _ensure_label_record(labels: list[LabelNode], name: str, parent_id: str | None, is_group: bool) -> str:
