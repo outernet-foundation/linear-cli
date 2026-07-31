@@ -1,6 +1,6 @@
 # linear-cli
 
-The audited write path into Linear — a small [typer](https://typer.tiangolo.com/) CLI that talks directly to Linear's GraphQL API over `httpx`, one named operation per call. Every ticket, project, and label write goes through a tool verb, so each mutation is a single reviewable HTTP call rather than an ad-hoc `curl` or an opaque MCP server.
+The audited write path into Linear — a small [typer](https://typer.tiangolo.com/) CLI that talks directly to Linear's GraphQL API over `httpx`, generating each query or mutation from a template at call time. Every ticket, project, and label write goes through a tool verb, so each mutation is a single reviewable HTTP call rather than an ad-hoc `curl` or an opaque MCP server.
 
 The ticketing conventions this tool enforces (declarative outcome-tickets, imperative titles, the `**Why:** / **Done when:** / **Links:**` body template, `blocks`-for-sequence) live in [`AGENTS.md`](./AGENTS.md). The multi-workspace profile system is documented in [`design/multi-workspace-profiles.md`](./design/multi-workspace-profiles.md).
 
@@ -27,17 +27,17 @@ Create `~/.config/linear-cli/config.json` as a map of profile-name → workspace
 }
 ```
 
-Then `linear --profile foundation list-issues --team PLE` works from anywhere; from `/workspace/pulsar/` the profile resolves automatically via the paths list, and only `--team TYL` is needed. `--team` is required on every team-scoped write — there is no path-level team default, because picking a team means picking a ticket lifecycle, and a single repo can produce tickets in multiple lifecycles. See [`design/multi-workspace-profiles.md`](./design/multi-workspace-profiles.md) for the full resolution rules.
+Then `linear --profile foundation issue list --team PLE` works from anywhere; from `/workspace/pulsar/` the profile resolves automatically via the paths list, and only `--team TYL` is needed. `--team` is required on every team-scoped write — there is no path-level team default, because picking a team means picking a ticket lifecycle, and a single repo can produce tickets in multiple lifecycles. See [`design/multi-workspace-profiles.md`](./design/multi-workspace-profiles.md) for the full resolution rules.
 
 ## Usage
 
 ```bash
-uv run linear --help                 # list every verb
-uv run linear list-projects          # read verbs emit one JSON object per row on stdout
-uv run linear list-issues --team PLE # team is explicit; omit for workspace-wide
+uv run linear --help                    # list every noun
+uv run linear project list              # read verbs emit one JSON object per row on stdout
+uv run linear issue list --team PLE     # team is explicit; omit for workspace-wide
 ```
 
-`--team` is required on team-scoped writes (`create-issue`, `create-project`, `create-workflow-state`, `list-workflow-states`), optional as a filter on `list-issues`/`list-relations`/`lint`, and used for cross-team moves on `update-issue`/`update-project`. `create-issue` and `update-issue` validate the title and body against the conventions before sending the mutation and refuse to write anything off-template. `uv run linear lint` audits already-created tickets after the fact.
+`--team` is required on team-scoped writes (`issue create`, `project create`, `workflow-state create`, `workflow-state list`), optional as a filter on `issue list`/`relation list`/`lint`, and used for cross-team moves on `issue update`/`project update`. `issue create` and `issue update` validate the title and body against the conventions before sending the mutation and refuse to write anything off-template. `uv run linear lint` audits already-created tickets after the fact.
 
 ## Global install (optional)
 
