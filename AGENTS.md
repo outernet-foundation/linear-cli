@@ -70,7 +70,7 @@ A project's `teamIds` list gates which teams' issues it can collect. `update-iss
 
 **A big initiative is a Project + phase-issues + a `blocks` graph + just-in-time file sub-issues.** The project's direct issues are coarse phases. The fine, ~1:1-with-PR units are sub-issues created at the last responsible moment when a phase is picked up — never enumerated up front, because per-file scope goes stale before it is worked.
 
-**Priority is ignored.** The built-in priority field is unused; do not set it.
+**Priority is per-team.** Three effective levels: Urgent (1), High (2), and No Priority (0) — the default. GOV and OPS use priority; most tickets stay at 0 (normal), with Urgent reserved for deadlines or legal requirements and High for work that blocks other items. PLE does not use priority — product features are sequenced through the `blocks` graph and project ordering, not through a priority field. Never set Medium (3) or Low (4); "normal" is the absence of priority, not an explicit level.
 
 ## See also
 
