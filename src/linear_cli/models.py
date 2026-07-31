@@ -54,51 +54,11 @@ class IssueListNode(LinearModel):
     project: ProjectRef | None = None
 
 
-class AttachmentNode(LinearModel):
-    id: str
-    title: str | None = None
-    subtitle: str | None = None
-    url: str
-    metadata: dict[str, object] | None = None
-
-
-class LabelIdRef(LinearModel):
-    id: str
-
-
-class IssueDetailNode(LinearModel):
-    identifier: str
-    title: str
-    description: str | None = None
-    url: str
-    created_at: str = Field(alias="createdAt")
-    archived_at: str | None = Field(default=None, alias="archivedAt")
-    state: IssueStateNode
-    team: TeamNode | None = None
-    project: ProjectRef | None = None
-    labels: NodeList[LabelIdRef] = Field(default_factory=lambda: NodeList(nodes=[]))
-    attachments: NodeList[AttachmentNode]
-
-
 class ProjectListNode(LinearModel):
     id: str
     name: str
     url: str
     state: str
-
-
-class RelatedIssueNode(LinearModel):
-    identifier: str
-
-
-class IssueRelationNode(LinearModel):
-    type: str
-    related_issue: RelatedIssueNode | None = Field(default=None, alias="relatedIssue")
-
-
-class IssueRelationsNode(LinearModel):
-    identifier: str
-    relations: NodeList[IssueRelationNode]
 
 
 class CommentUserNode(LinearModel):
@@ -151,24 +111,12 @@ class IssuesData(LinearModel):
     issues: Connection[IssueListNode]
 
 
-class IssueDetailData(LinearModel):
-    issue: IssueDetailNode
-
-
 class ProjectsData(LinearModel):
     projects: Connection[ProjectListNode]
 
 
-class IssueRelationsData(LinearModel):
-    issues: Connection[IssueRelationsNode]
-
-
 class IssueSnapshotData(LinearModel):
     issues: Connection[IssueSnapshotNode]
-
-
-class IssueSnapshotByIdData(LinearModel):
-    issue: IssueSnapshotNode
 
 
 class WorkflowStatesData(LinearModel):

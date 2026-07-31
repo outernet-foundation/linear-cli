@@ -1,16 +1,12 @@
 from __future__ import annotations
 
+from linear_cli.client import DELETE_VERBS, RESOURCES, build_mutation
 from linear_cli.models import TeamNode
 from linear_cli.operations import (
-    DELETE_VERBS,
-    ISSUE_DETAIL_FIELDS,
     ISSUE_LIST_FIELDS,
     LABEL_FIELDS,
-    RESOURCES,
     TEAM_FIELDS,
     build_list_query,
-    build_mutation,
-    build_node_query,
 )
 
 
@@ -84,13 +80,6 @@ def test_build_list_query_labels() -> None:
     query = build_list_query("issueLabels", LABEL_FIELDS)
     assert "issueLabels(first: 250)" in query
     assert "pageInfo" not in query
-
-
-def test_build_node_query() -> None:
-    query = build_node_query("issue", ISSUE_DETAIL_FIELDS)
-    assert "$id: String!" in query
-    assert "issue(id: $id)" in query
-    assert "identifier" in query
 
 
 def test_delete_verbs_mapping() -> None:

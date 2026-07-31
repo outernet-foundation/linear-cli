@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import sys
 from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
 from typing import NoReturn
@@ -10,12 +12,42 @@ import httpx
 import typer
 from pydantic import TypeAdapter, ValidationError
 
-from .models import Connection, LinearModel, ResponsePayload
-from .operations import DELETE_VERBS, RESOURCES, build_mutation
+from .models import (
+    Connection,
+    IssueSnapshotNode,
+    LabelsData,
+    LinearModel,
+    ResponsePayload,
+    TeamsData,
+)
+from .operations import LABEL_FIELDS, TEAM_FIELDS, build_list_query
 from .profiles import CONFIG_PATH, ProfileConfig, load_config, resolve_profile_name
 
 LINEAR_ENDPOINT = "https://api.linear.app/graphql"
 _dict_adapter = TypeAdapter(dict[str, object])
+
+DELETE_VERBS: dict[str, str] = {
+    "Delete": "deleted",
+    "Archive": "archived",
+    "Unarchive": "unarchived",
+}
+
+
+@dataclass(frozen=True)
+class Resource:
+    node: str
+    return_fields: str
+
+
+RESOURCES: dict[str, Resource] = {
+    "team": Resource(node="team", return_fields="id key name"),
+    "issue": Resource(node="issue", return_fields="id identifier url"),
+    "project": Resource(node="project", return_fields="id url"),
+    "issueLabel": Resource(node="issueLabel", return_fields="id name"),
+    "workflowState": Resource(node="workflowState", return_fields="id name type"),
+    "comment": Resource(node="comment", return_fields="id url"),
+    "issueRelation": Resource(node="", return_fields=""),
+}
 
 
 class CliState:
@@ -56,6 +88,37 @@ def paginate[T: LinearModel, NodeT](
         after = connection.page_info.end_cursor
 
 
+def resolve_team_id(key: str) -> str:
+    query = build_list_query("teams", TEAM_FIELDS)
+    teams = TeamsData.model_validate(graphql(query, {})).teams.nodes
+    team = next((team for team in teams if team.key == key), None)
+    if team is None:
+        available = ", ".join(sorted(team.key for team in teams))
+        fail(f"No team with key {key!r}; available keys: {available}")
+    return team.id
+
+
+def resolve_label_ids(labels: list[str]) -> list[str]:
+    query = build_list_query("issueLabels", LABEL_FIELDS)
+    all_labels = LabelsData.model_validate(graphql(query, {})).issue_labels.nodes
+    name_to_id = {label.name: label.id for label in all_labels}
+    resolved: list[str] = []
+    for label in labels:
+        if label in name_to_id:
+            resolved.append(name_to_id[label])
+        elif len(label) == 36 and label.count("-") == 4:
+            resolved.append(label)
+        else:
+            available = ", ".join(sorted(name_to_id))
+            fail(f"Unknown label {label!r}; available names: {available}")
+    return resolved
+
+
+def require_fields(fields: dict[str, object], message: str) -> None:
+    if not fields:
+        fail(message)
+
+
 def graphql(query: str, variables: dict[str, object]) -> dict[str, object]:
     response = httpx.post(
         LINEAR_ENDPOINT,
@@ -82,8 +145,61 @@ def graphql(query: str, variables: dict[str, object]) -> dict[str, object]:
     return _expect_dict(data)
 
 
+def build_mutation(noun: str, verb: str) -> str:
+    resource = RESOURCES[noun]
+    field = f"{noun}{verb}"
+    node_selection = f" {resource.node} {{ {resource.return_fields} }}" if resource.return_fields else ""
+
+    if verb == "Create":
+        return (
+            f"mutation($input: {_pascal(noun)}CreateInput!) {{ {field}(input: $input) {{ success{node_selection} }} }}"
+        )
+    if verb == "Update":
+        return (
+            f"mutation($id: String!, $input: {_pascal(noun)}UpdateInput!) "
+            f"{{ {field}(id: $id, input: $input) {{ success{node_selection} }} }}"
+        )
+    return f"mutation($id: String!) {{ {field}(id: $id) {{ success }} }}"
+
+
 def resolved_profile_name() -> str:
     return resolve_profile_name(_load_config_or_die(), CliState.profile_override, Path.cwd())
+
+
+def emit(record: dict[str, object]) -> None:
+    typer.echo(json.dumps(record))
+
+
+def team_filter(team: str | None) -> dict[str, object]:
+    return {"team": {"key": {"eq": team}}} if team is not None else {}
+
+
+def read_stdin() -> str:
+    return sys.stdin.read() if not sys.stdin.isatty() else ""
+
+
+def snapshot_issue_dict(node: IssueSnapshotNode) -> dict[str, object]:
+    return {
+        "id": node.id,
+        "identifier": node.identifier,
+        "title": node.title,
+        "description": node.description,
+        "state": node.state.name,
+        "state_type": node.state.type,
+        "team": node.team.key if node.team else None,
+        "project": node.project.name if node.project else None,
+        "priority": node.priority,
+        "archived_at": node.archived_at,
+        "labels": [label.name for label in node.labels.nodes],
+        "comments": [
+            {
+                "body": comment.body,
+                "user": comment.user.name if comment.user else None,
+                "created_at": comment.created_at,
+            }
+            for comment in node.comments.nodes
+        ],
+    }
 
 
 def _expect_dict(value: object | None) -> dict[str, object]:
@@ -99,6 +215,10 @@ def _load_config_or_die() -> ProfileConfig:
     if config is None:
         fail(f"No profile config found at {CONFIG_PATH}; create one with profiles and path_defaults.")
     return config
+
+
+def _pascal(noun: str) -> str:
+    return noun[0].upper() + noun[1:]
 
 
 def fail(message: str) -> NoReturn:
