@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from linear_cli.validation import orphan_design_docs, validate_body, validate_label_presence, validate_title
+from linear_cli.validation import fix_bare_paths, orphan_design_docs, validate_body, validate_label_presence, validate_title
 
 CONFORMING = (
     "**Why:** The thing is broken in a specific, self-contained way.\n\n"
@@ -113,3 +113,27 @@ def test_label_presence_fails_when_no_group_label() -> None:
     violations = validate_label_presence([], {"governance", "multi-repo"}, "repo")
     assert len(violations) == 1
     assert "repo" in violations[0]
+
+
+def test_fix_bare_paths_resolves_prefixed_path() -> None:
+    body = CONFORMING + "\n\nSee governance/AGENTS.md for details."
+    repo_urls = {"governance": "https://github.com/outernet-foundation/governance/blob/main"}
+    fixed, fixes = fix_bare_paths(body, repo_urls, "governance")
+    assert len(fixes) == 1
+    assert "https://github.com/outernet-foundation/governance/blob/main/AGENTS.md" in fixed
+    assert validate_body(fixed) == []
+
+
+def test_fix_bare_paths_resolves_unprefixed_with_default() -> None:
+    body = CONFORMING + "\n\nSee scripts/build_packet.py for details."
+    repo_urls = {"governance": "https://github.com/outernet-foundation/governance/blob/main"}
+    fixed, fixes = fix_bare_paths(body, repo_urls, "governance")
+    assert len(fixes) == 1
+    assert "https://github.com/outernet-foundation/governance/blob/main/scripts/build_packet.py" in fixed
+
+
+def test_fix_bare_paths_skips_unresolvable() -> None:
+    body = CONFORMING + "\n\nSee unknown/path/to/file.md for details."
+    fixed, fixes = fix_bare_paths(body, {}, None)
+    assert len(fixes) == 0
+    assert fixed == body

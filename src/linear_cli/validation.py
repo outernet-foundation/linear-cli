@@ -81,6 +81,30 @@ def validate_body(body: str) -> list[str]:
     return violations
 
 
+def fix_bare_paths(body: str, repo_urls: dict[str, str], default_repo: str | None) -> tuple[str, list[str]]:
+    body_without_links = _MARKDOWN_LINK.sub("", body)
+    fixes: list[str] = []
+
+    for match in _BARE_PATH.finditer(body_without_links):
+        bare_path = match.group()
+        url = _resolve_repo_path(bare_path, repo_urls, default_repo)
+        if url is not None:
+            body = body.replace(bare_path, f"[{bare_path}]({url})", 1)
+            fixes.append(f"{bare_path} -> {url}")
+
+    return body, fixes
+
+
+def _resolve_repo_path(path: str, repo_urls: dict[str, str], default_repo: str | None) -> str | None:
+    for repo_name, base_url in repo_urls.items():
+        prefix = f"{repo_name}/"
+        if path.startswith(prefix):
+            return f"{base_url}/{path[len(prefix):]}"
+    if default_repo and default_repo in repo_urls:
+        return f"{repo_urls[default_repo]}/{path}"
+    return None
+
+
 def validate_label_presence(
     label_names: list[str], required_group_labels: set[str], group_name: str
 ) -> list[str]:

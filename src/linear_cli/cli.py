@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
@@ -20,7 +21,7 @@ from .profiles import (
     resolve_profile_name,
 )
 from .snapshot import identifier_sort_key, label_snapshot_filter
-from .validation import orphan_design_docs, validate_body, validate_label_presence, validate_title
+from .validation import fix_bare_paths, orphan_design_docs, validate_body, validate_label_presence, validate_title
 
 LINEAR_ENDPOINT = "https://api.linear.app/graphql"
 OPERATIONS_DOCUMENT = "linear_operations.graphql"
@@ -89,6 +90,10 @@ class AttachmentNode(_Model):
     metadata: dict[str, object] | None = None
 
 
+class LabelIdRef(_Model):
+    id: str
+
+
 class IssueDetailNode(_Model):
     identifier: str
     title: str
@@ -99,6 +104,7 @@ class IssueDetailNode(_Model):
     state: IssueStateNode
     team: TeamNode | None = None
     project: ProjectRef | None = None
+    labels: _NodeList[LabelIdRef] = Field(default_factory=lambda: _NodeList(nodes=[]))
     attachments: _NodeList[AttachmentNode]
 
 
@@ -396,7 +402,7 @@ def list_issues(
 
 @app.command(name="get-issue")
 def get_issue(
-    issue_id: Annotated[str, typer.Option("--id", help="Issue id to fetch")],
+    issue_id: Annotated[str, typer.Option("--id", help="Issue id or identifier, e.g. GOV-21")],
 ) -> None:
     issue = graphql("Issue", {"id": issue_id}, IssueDetailData).issue
     _emit({
@@ -433,6 +439,46 @@ def list_relations(
                 continue
 
             _emit({"source": issue.identifier, "target": relation.related_issue.identifier, "type": relation.type})
+
+
+@app.command(name="find-references")
+def find_references(
+    identifier: Annotated[str, typer.Argument(help="Ticket identifier to search for, e.g. GOV-29")],
+    scan_linear: Annotated[
+        bool, typer.Option("--scan-linear", help="Also scan Linear ticket bodies and comments")
+    ] = False,
+) -> None:
+    import subprocess
+
+    result = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        typer.echo("Not inside a git repository", err=True)
+        raise typer.Exit(1)
+
+    repo_root = Path(result.stdout.strip())
+    boundary = re.compile(r"\b" + re.escape(identifier) + r"\b")
+
+    for file_path in sorted(repo_root.rglob("*")):
+        if ".git" in file_path.parts or "_build" in file_path.parts or not file_path.is_file():
+            continue
+        if file_path.suffix not in (".md", ".yml", ".yaml", ".json"):
+            continue
+        text = file_path.read_text(errors="ignore")
+        for line_num, line in enumerate(text.splitlines(), 1):
+            if boundary.search(line):
+                _emit({
+                    "source": str(file_path.relative_to(repo_root)),
+                    "line": line_num,
+                    "context": line.strip()[:200],
+                })
+
+    if scan_linear:
+        for issue in _paginate("Issues", {}, IssuesData, lambda data: data.issues):
+            if boundary.search(issue.description or "") or boundary.search(issue.title):
+                _emit({"source": issue.identifier, "line": 0, "context": "ticket body"})
 
 
 @app.command(name="list-projects")
@@ -609,6 +655,9 @@ def lint(
         str | None,
         typer.Option("--require-label-parent", help="Require every ticket to carry a label in this parent group, e.g. repo"),
     ] = None,
+    fix_paths: Annotated[
+        bool, typer.Option("--fix-paths", help="Auto-fix bare repo-relative paths in ticket bodies to full GitHub blob URLs")
+    ] = False,
 ) -> None:
     skip_types = {"completed"}
     if not include_canceled:
@@ -631,6 +680,8 @@ def lint(
             )
             raise typer.Exit(1)
 
+    repo_urls, default_repo = _discover_repo_urls() if fix_paths else ({}, None)
+
     offenders = 0
     open_bodies: list[str] = []
     for issue in _paginate("Issues", {"filter": _team_filter(team)}, IssuesData, lambda data: data.issues):
@@ -638,11 +689,27 @@ def lint(
             continue
 
         open_bodies.append(issue.description or "")
-        violations = validate_title(issue.title) + validate_body(issue.description or "")
+        body = issue.description or ""
+        violations = validate_title(issue.title) + validate_body(body)
         if group_labels is not None:
             violations += validate_label_presence(
                 [label.name for label in issue.labels.nodes], group_labels, require_label_parent
             )
+
+        bare_path_violations = [v for v in violations if v.startswith("bare path")]
+        if fix_paths and bare_path_violations:
+            fixed_body, fixes = fix_bare_paths(body, repo_urls, default_repo)
+            if fixes:
+                graphql("UpdateIssue", {"id": issue.id, "input": {"description": fixed_body}}, IssueUpdateData).issue_update
+                _emit({"identifier": issue.identifier, "fixed_paths": fixes})
+                body = fixed_body
+                violations = validate_title(issue.title) + validate_body(body)
+                if group_labels is not None:
+                    violations += validate_label_presence(
+                        [label.name for label in issue.labels.nodes], group_labels, require_label_parent
+                    )
+                violations = [v for v in violations if not v.startswith("bare path")]
+
         if violations:
             offenders += 1
             _emit({"identifier": issue.identifier, "title": issue.title, "violations": violations})
@@ -814,10 +881,12 @@ def create_issue(
     help="Reads the new issue description (markdown body) from stdin if any is piped in. Piped bodies must match the Why/Done-when/Links template.",
 )
 def update_issue(
-    issue_id: Annotated[str, typer.Option("--id", help="Issue id to update")],
+    issue_id: Annotated[str, typer.Option("--id", help="Issue id or identifier, e.g. GOV-21")],
     title: Annotated[str | None, typer.Option("--title", help="New issue title")] = None,
     project: Annotated[str | None, typer.Option("--project", help="Project id to move the issue under")] = None,
     label: Annotated[list[str] | None, typer.Option("--label", help="Replaces the label set by name or id (repeatable)")] = None,
+    add_label: Annotated[list[str] | None, typer.Option("--add-label", help="Label name or id to add to the existing set (repeatable)")] = None,
+    remove_label: Annotated[list[str] | None, typer.Option("--remove-label", help="Label name or id to remove from the existing set (repeatable)")] = None,
     state: Annotated[str | None, typer.Option("--state", help="Workflow state name to move the issue to")] = None,
     team: Annotated[
         str | None,
@@ -834,8 +903,14 @@ def update_issue(
         fields["description"] = description
     if project is not None:
         fields["projectId"] = project
-    if label:
+    if label is not None and add_label is None and remove_label is None:
         fields["labelIds"] = _resolve_label_ids(label)
+    elif add_label is not None or remove_label is not None:
+        issue = graphql("Issue", {"id": issue_id}, IssueDetailData).issue
+        current_ids = {ref.id for ref in issue.labels.nodes}
+        add_ids = set(_resolve_label_ids(add_label)) if add_label else set()
+        remove_ids = set(_resolve_label_ids(remove_label)) if remove_label else set()
+        fields["labelIds"] = list(current_ids | add_ids - remove_ids)
     if team is not None:
         fields["teamId"] = _resolve_team_id(team)
     if state is not None:
@@ -854,7 +929,7 @@ def update_issue(
     if priority is not None:
         fields["priority"] = priority
 
-    _require_fields(fields, "Nothing to update; pass --team, --title, --label, --state, --priority, or a body on stdin")
+    _require_fields(fields, "Nothing to update; pass --team, --title, --label, --add-label, --remove-label, --state, --priority, or a body on stdin")
 
     payload = graphql("UpdateIssue", {"id": issue_id, "input": fields}, IssueUpdateData).issue_update
     issue = _require(payload.success, payload.issue, f"Failed to update issue {issue_id!r}")
@@ -1092,6 +1167,39 @@ def _find_up(marker: str) -> Path:
             return candidate
 
     raise RuntimeError(f"No {marker} found in the current directory or any parent; run from inside the repo")
+
+
+def _discover_repo_urls() -> tuple[dict[str, str], str | None]:
+    import subprocess
+
+    mappings: dict[str, str] = {}
+    default_repo: str | None = None
+
+    cwd = Path.cwd()
+    for repo_dir in sorted(cwd.parent.iterdir()) if cwd.parent.exists() else []:
+        if not repo_dir.is_dir() or repo_dir.name.startswith("."):
+            continue
+        result = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            capture_output=True, text=True, cwd=repo_dir,
+        )
+        if result.returncode != 0:
+            continue
+        remote = result.stdout.strip()
+        match = re.match(r"(?:https://|git@)github\.com[/:](\S+?)(?:\.git)?$", remote)
+        if not match:
+            continue
+        base = f"https://github.com/{match.group(1)}/blob/main"
+        mappings[repo_dir.name] = base
+        projects_dir = repo_dir / "projects"
+        if projects_dir.is_dir():
+            for project_dir in sorted(projects_dir.iterdir()):
+                if project_dir.is_dir() and not project_dir.name.startswith("."):
+                    mappings[project_dir.name] = f"{base}/projects/{project_dir.name}"
+        if cwd == repo_dir or repo_dir in cwd.parents:
+            default_repo = repo_dir.name
+
+    return mappings, default_repo
 
 
 def _api_key() -> str:

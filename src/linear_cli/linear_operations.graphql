@@ -162,6 +162,11 @@ query Issue($id: String!) {
       id
       name
     }
+    labels {
+      nodes {
+        id
+      }
+    }
     attachments {
       nodes {
         id
