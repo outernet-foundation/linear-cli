@@ -21,7 +21,25 @@ _FORBIDDEN_SECTIONS = re.compile(
     re.MULTILINE | re.IGNORECASE,
 )
 _BARE_PATH = re.compile(r"(?<![\w/])[\w][\w.-]*(?:/[\w.-]+)+\.(?:md|py|yml|yaml|json|xlsx|docx|pdf)\b")
-_FILENAME_TLDS = frozenset({"py", "md", "json", "yml", "yaml", "txt", "csv", "ts", "js", "rs", "go", "cs", "sh", "sql", "tsx", "jsx"})
+# _BARE_PATH catches repo-relative paths in prose; _FILENAME_TLDS catches filenames masquerading as URL hostnames — different detection goals, different extension sets.
+_FILENAME_TLDS = frozenset({
+    "py",
+    "md",
+    "json",
+    "yml",
+    "yaml",
+    "txt",
+    "csv",
+    "ts",
+    "js",
+    "rs",
+    "go",
+    "cs",
+    "sh",
+    "sql",
+    "tsx",
+    "jsx",
+})
 
 
 def validate_title(title: str) -> list[str]:
@@ -60,6 +78,19 @@ def validate_body(body: str) -> list[str]:
             f"forbidden section {match.group().strip()!r} — implementation plans belong in sub-issues or PRs, not ticket bodies"
         )
 
+    violations.extend(_validate_link_targets(body))
+
+    body_without_links = _MARKDOWN_LINK.sub("", body)
+    for match in _BARE_PATH.finditer(body_without_links):
+        violations.append(
+            f"bare path {match.group()!r} in body — use a full github.com blob URL instead of a repo-relative path"
+        )
+
+    return violations
+
+
+def _validate_link_targets(body: str) -> list[str]:
+    violations: list[str] = []
     for target in _LINK_TARGET.findall(body):
         parsed = urlparse(target)
         hostname = parsed.hostname or ""
@@ -71,13 +102,6 @@ def validate_body(body: str) -> list[str]:
             violations.append(
                 f"link target {target!r} looks like a bare filename auto-linked as a URL — use a full github.com blob URL"
             )
-
-    body_without_links = _MARKDOWN_LINK.sub("", body)
-    for match in _BARE_PATH.finditer(body_without_links):
-        violations.append(
-            f"bare path {match.group()!r} in body — use a full github.com blob URL instead of a repo-relative path"
-        )
-
     return violations
 
 
@@ -99,15 +123,13 @@ def _resolve_repo_path(path: str, repo_urls: dict[str, str], default_repo: str |
     for repo_name, base_url in repo_urls.items():
         prefix = f"{repo_name}/"
         if path.startswith(prefix):
-            return f"{base_url}/{path[len(prefix):]}"
+            return f"{base_url}/{path[len(prefix) :]}"
     if default_repo and default_repo in repo_urls:
         return f"{repo_urls[default_repo]}/{path}"
     return None
 
 
-def validate_label_presence(
-    label_names: list[str], required_group_labels: set[str], group_name: str
-) -> list[str]:
+def validate_label_presence(label_names: list[str], required_group_labels: set[str], group_name: str) -> list[str]:
     if not any(name in required_group_labels for name in label_names):
         return [f"ticket carries no label in the {group_name!r} group"]
     return []

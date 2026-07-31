@@ -1,6 +1,12 @@
 from __future__ import annotations
 
-from linear_cli.validation import fix_bare_paths, orphan_design_docs, validate_body, validate_label_presence, validate_title
+from linear_cli.validation import (
+    fix_bare_paths,
+    orphan_design_docs,
+    validate_body,
+    validate_label_presence,
+    validate_title,
+)
 
 CONFORMING = (
     "**Why:** The thing is broken in a specific, self-contained way.\n\n"

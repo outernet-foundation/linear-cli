@@ -45,6 +45,11 @@ wheels = [
 ]
 
 [[package]]
+name = "bashrun"
+version = "0.1.0"
+source = { git = "https://github.com/outernet-foundation/bashrun.git?rev=1a0add1eb9e53e19245dcdda3e2018577b4e1153#1a0add1eb9e53e19245dcdda3e2018577b4e1153" }
+
+[[package]]
 name = "certifi"
 version = "2026.6.17"
 source = { registry = "https://pypi.org/simple" }
@@ -122,6 +127,7 @@ name = "linear-cli"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "bashrun" },
     { name = "httpx" },
     { name = "pydantic" },
     { name = "typer" },
@@ -136,6 +142,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "bashrun", git = "https://github.com/outernet-foundation/bashrun.git?rev=1a0add1eb9e53e19245dcdda3e2018577b4e1153" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "pydantic", specifier = ">=2" },
     { name = "typer", specifier = ">=0.15" },

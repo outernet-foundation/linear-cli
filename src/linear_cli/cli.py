@@ -7,15 +7,15 @@ from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from functools import cache
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, NoReturn
 
 import httpx
 import typer
+from bashrun import bash_check, bash_output
 from pydantic import BaseModel, ConfigDict, Field
 
 from .profiles import (
     CONFIG_PATH,
-    Profile,
     ProfileConfig,
     load_config,
     resolve_profile_name,
@@ -25,6 +25,9 @@ from .validation import fix_bare_paths, orphan_design_docs, validate_body, valid
 
 LINEAR_ENDPOINT = "https://api.linear.app/graphql"
 OPERATIONS_DOCUMENT = "linear_operations.graphql"
+_OPERATIONS = Path(__file__).with_name(OPERATIONS_DOCUMENT).read_text(encoding="utf-8")
+
+app = typer.Typer(add_completion=False, pretty_exceptions_show_locals=False)
 
 
 class _Model(BaseModel):
@@ -204,13 +207,13 @@ class CommentNode(_Model):
     url: str
 
 
+class SuccessPayload(_Model):
+    success: bool
+
+
 class IssueLabelMutationPayload(_Model):
     success: bool
     issue_label: CreatedLabel | None = Field(default=None, alias="issueLabel")
-
-
-class IssueLabelDeletePayload(_Model):
-    success: bool
 
 
 class ProjectMutationPayload(_Model):
@@ -228,26 +231,14 @@ class WorkflowStateMutationPayload(_Model):
     workflow_state: CreatedWorkflowState | None = Field(default=None, alias="workflowState")
 
 
-class ProjectDeletePayload(_Model):
-    success: bool
-
-
 class IssueMutationPayload(_Model):
     success: bool
     issue: CreatedIssue | None = None
 
 
-class IssueRelationCreatePayload(_Model):
-    success: bool
-
-
 class CommentCreatePayload(_Model):
     success: bool
     comment: CommentNode | None = None
-
-
-class CommentDeletePayload(_Model):
-    success: bool
 
 
 class TeamsData(_Model):
@@ -295,7 +286,7 @@ class IssueLabelUpdateData(_Model):
 
 
 class IssueLabelDeleteData(_Model):
-    issue_label_delete: IssueLabelDeletePayload = Field(alias="issueLabelDelete")
+    issue_label_delete: SuccessPayload = Field(alias="issueLabelDelete")
 
 
 class ProjectCreateData(_Model):
@@ -314,12 +305,8 @@ class WorkflowStateCreateData(_Model):
     workflow_state_create: WorkflowStateMutationPayload = Field(alias="workflowStateCreate")
 
 
-class WorkflowStateArchivePayload(_Model):
-    success: bool
-
-
 class WorkflowStateArchiveData(_Model):
-    workflow_state_archive: WorkflowStateArchivePayload = Field(alias="workflowStateArchive")
+    workflow_state_archive: SuccessPayload = Field(alias="workflowStateArchive")
 
 
 class ProjectUpdateData(_Model):
@@ -327,7 +314,7 @@ class ProjectUpdateData(_Model):
 
 
 class ProjectDeleteData(_Model):
-    project_delete: ProjectDeletePayload = Field(alias="projectDelete")
+    project_delete: SuccessPayload = Field(alias="projectDelete")
 
 
 class IssueCreateData(_Model):
@@ -339,7 +326,7 @@ class IssueUpdateData(_Model):
 
 
 class IssueRelationCreateData(_Model):
-    issue_relation_create: IssueRelationCreatePayload = Field(alias="issueRelationCreate")
+    issue_relation_create: SuccessPayload = Field(alias="issueRelationCreate")
 
 
 class CommentCreateData(_Model):
@@ -347,18 +334,11 @@ class CommentCreateData(_Model):
 
 
 class CommentDeleteData(_Model):
-    comment_delete: CommentDeletePayload = Field(alias="commentDelete")
-
-
-class IssueUnarchivePayload(_Model):
-    success: bool
+    comment_delete: SuccessPayload = Field(alias="commentDelete")
 
 
 class IssueUnarchiveData(_Model):
-    issue_unarchive: IssueUnarchivePayload = Field(alias="issueUnarchive")
-
-
-app = typer.Typer(add_completion=False, pretty_exceptions_show_locals=False)
+    issue_unarchive: SuccessPayload = Field(alias="issueUnarchive")
 
 
 @app.callback()
@@ -448,30 +428,23 @@ def find_references(
         bool, typer.Option("--scan-linear", help="Also scan Linear ticket bodies and comments")
     ] = False,
 ) -> None:
-    import subprocess
+    if not bash_check("git rev-parse --show-toplevel"):
+        _fail("Not inside a git repository")
 
-    result = subprocess.run(
-        ["git", "rev-parse", "--show-toplevel"],
-        capture_output=True, text=True,
-    )
-    if result.returncode != 0:
-        typer.echo("Not inside a git repository", err=True)
-        raise typer.Exit(1)
-
-    repo_root = Path(result.stdout.strip())
+    repository_root = Path(bash_output("git rev-parse --show-toplevel").strip())
     boundary = re.compile(r"\b" + re.escape(identifier) + r"\b")
 
-    for file_path in sorted(repo_root.rglob("*")):
+    for file_path in sorted(repository_root.rglob("*")):
         if ".git" in file_path.parts or "_build" in file_path.parts or not file_path.is_file():
             continue
         if file_path.suffix not in (".md", ".yml", ".yaml", ".json"):
             continue
         text = file_path.read_text(errors="ignore")
-        for line_num, line in enumerate(text.splitlines(), 1):
+        for line_number, line in enumerate(text.splitlines(), 1):
             if boundary.search(line):
                 _emit({
-                    "source": str(file_path.relative_to(repo_root)),
-                    "line": line_num,
+                    "source": str(file_path.relative_to(repository_root)),
+                    "line": line_number,
                     "context": line.strip()[:200],
                 })
 
@@ -584,17 +557,31 @@ def snapshot(
         str | None, typer.Option("--label", help="Label name; snapshot every issue carrying this label")
     ] = None,
 ) -> None:
-    if issue is None and label is None:
-        typer.echo("Pass --issue (repeatable) or --label to select issues to snapshot.", err=True)
-        raise typer.Exit(1)
     if issue is not None and label is not None:
-        typer.echo("Pass --issue or --label, not both.", err=True)
-        raise typer.Exit(1)
+        _fail("Pass --issue or --label, not both.")
 
-    nodes = _snapshot_nodes(issue, label)
+    if issue is not None:
+        nodes = [graphql("IssueSnapshotById", {"id": identifier}, IssueSnapshotByIdData).issue for identifier in issue]
+    elif label is not None:
+        nodes = list(
+            _paginate(
+                "IssueSnapshot", {"filter": label_snapshot_filter(label)}, IssueSnapshotData, lambda data: data.issues
+            )
+        )
+    else:
+        _fail("Pass --issue (repeatable) or --label to select issues to snapshot.")
     nodes.sort(key=lambda node: identifier_sort_key(node.identifier))
-    record = _snapshot_record(_resolved_profile_name(), nodes, datetime.now(UTC).isoformat())
-    typer.echo(json.dumps(record, indent=2))
+
+    typer.echo(
+        json.dumps(
+            {
+                "captured_at": datetime.now(UTC).isoformat(),
+                "linear_profile": _resolved_profile_name(),
+                "issues": [_snapshot_issue_dict(node) for node in nodes],
+            },
+            indent=2,
+        )
+    )
 
 
 @app.command(name="snapshot-workspace")
@@ -606,23 +593,15 @@ def snapshot_workspace() -> None:
     projects = list(_paginate("Projects", {}, ProjectsData, lambda data: data.projects))
     labels = graphql("Labels", {}, LabelsData).issue_labels.nodes
     workflow_states = graphql("WorkflowStates", {"filter": {}}, WorkflowStatesData).workflow_states.nodes
-    issues = list(
-        _paginate(
-            "IssueSnapshot", {"includeArchived": True}, IssueSnapshotData, lambda data: data.issues
-        )
-    )
+    issues = list(_paginate("IssueSnapshot", {"includeArchived": True}, IssueSnapshotData, lambda data: data.issues))
 
     record = {
         "captured_at": captured_at,
         "linear_profile": profile_name,
         "teams": [{"id": team.id, "key": team.key, "name": team.name} for team in teams],
-        "workflow_states": [
-            {"id": state.id, "name": state.name, "type": state.type}
-            for state in workflow_states
-        ],
+        "workflow_states": [{"id": state.id, "name": state.name, "type": state.type} for state in workflow_states],
         "projects": [
-            {"id": project.id, "name": project.name, "state": project.state, "url": project.url}
-            for project in projects
+            {"id": project.id, "name": project.name, "state": project.state, "url": project.url} for project in projects
         ],
         "labels": [
             {
@@ -635,8 +614,7 @@ def snapshot_workspace() -> None:
             for label in labels
         ],
         "issues": [
-            _snapshot_issue_dict(node)
-            for node in sorted(issues, key=lambda node: identifier_sort_key(node.identifier))
+            _snapshot_issue_dict(node) for node in sorted(issues, key=lambda node: identifier_sort_key(node.identifier))
         ],
     }
     typer.echo(json.dumps(record, indent=2))
@@ -648,15 +626,16 @@ def lint(
     design_orphans: Annotated[
         bool, typer.Option("--design-orphans", help="Also flag design/ docs that no open ticket links")
     ] = False,
-    include_canceled: Annotated[
-        bool, typer.Option("--include-canceled", help="Also lint canceled issues")
-    ] = False,
+    include_canceled: Annotated[bool, typer.Option("--include-canceled", help="Also lint canceled issues")] = False,
     require_label_parent: Annotated[
         str | None,
-        typer.Option("--require-label-parent", help="Require every ticket to carry a label in this parent group, e.g. repo"),
+        typer.Option(
+            "--require-label-parent", help="Require every ticket to carry a label in this parent group, e.g. repo"
+        ),
     ] = None,
     fix_paths: Annotated[
-        bool, typer.Option("--fix-paths", help="Auto-fix bare repo-relative paths in ticket bodies to full GitHub blob URLs")
+        bool,
+        typer.Option("--fix-paths", help="Auto-fix bare repo-relative paths in ticket bodies to full GitHub blob URLs"),
     ] = False,
 ) -> None:
     skip_types = {"completed"}
@@ -665,22 +644,9 @@ def lint(
 
     group_labels: set[str] | None = None
     if require_label_parent is not None:
-        all_labels = graphql("Labels", {}, LabelsData).issue_labels.nodes
-        names_by_id = {label.id: label.name for label in all_labels}
-        group_labels = {
-            label.name
-            for label in all_labels
-            if label.parent and names_by_id.get(label.parent.id) == require_label_parent
-        }
-        if not group_labels:
-            typer.echo(
-                f"No labels found in group {require_label_parent!r}; available groups: "
-                f"{', '.join(sorted(label.name for label in all_labels if label.is_group))}",
-                err=True,
-            )
-            raise typer.Exit(1)
+        group_labels = _resolve_label_group(require_label_parent)
 
-    repo_urls, default_repo = _discover_repo_urls() if fix_paths else ({}, None)
+    repo_urls, default_repository = _discover_repo_urls() if fix_paths else ({}, None)
 
     offenders = 0
     open_bodies: list[str] = []
@@ -688,38 +654,16 @@ def lint(
         if issue.state.type in skip_types:
             continue
 
-        open_bodies.append(issue.description or "")
-        body = issue.description or ""
-        violations = validate_title(issue.title) + validate_body(body)
-        if group_labels is not None:
-            violations += validate_label_presence(
-                [label.name for label in issue.labels.nodes], group_labels, require_label_parent
-            )
-
-        bare_path_violations = [v for v in violations if v.startswith("bare path")]
-        if fix_paths and bare_path_violations:
-            fixed_body, fixes = fix_bare_paths(body, repo_urls, default_repo)
-            if fixes:
-                graphql("UpdateIssue", {"id": issue.id, "input": {"description": fixed_body}}, IssueUpdateData).issue_update
-                _emit({"identifier": issue.identifier, "fixed_paths": fixes})
-                body = fixed_body
-                violations = validate_title(issue.title) + validate_body(body)
-                if group_labels is not None:
-                    violations += validate_label_presence(
-                        [label.name for label in issue.labels.nodes], group_labels, require_label_parent
-                    )
-                violations = [v for v in violations if not v.startswith("bare path")]
-
+        issue_body, violations = _lint_issue(
+            issue, group_labels, require_label_parent, fix_paths, repo_urls, default_repository
+        )
+        open_bodies.append(issue_body)
         if violations:
             offenders += 1
             _emit({"identifier": issue.identifier, "title": issue.title, "violations": violations})
 
     if design_orphans:
-        design_dir = _find_up("design/AGENTS.md").parent
-        doc_names = [
-            path.name for path in sorted(design_dir.glob("*.md")) if path.name not in ("AGENTS.md", "CLAUDE.md")
-        ]
-        for name in orphan_design_docs(doc_names, open_bodies):
+        for name in _orphaned_design_docs(open_bodies):
             offenders += 1
             _emit({"design_orphan": f"design/{name}", "violations": ["no open Linear ticket links this design doc"]})
 
@@ -769,8 +713,7 @@ def update_label(
         labels = graphql("Labels", {}, LabelsData).issue_labels.nodes
         groups = [node for node in labels if node.is_group and node.name == parent]
         if len(groups) != 1:
-            typer.echo(f"Expected exactly one group named {parent!r}, found {len(groups)}", err=True)
-            raise typer.Exit(1)
+            _fail(f"Expected exactly one group named {parent!r}, found {len(groups)}")
 
         fields["parentId"] = groups[0].id
 
@@ -828,8 +771,7 @@ def update_project(
         fields["content"] = content
     if team is not None:
         if len(team) == 0:
-            typer.echo("--team requires at least one team key", err=True)
-            raise typer.Exit(1)
+            _fail("--team requires at least one team key")
         fields["teamIds"] = [_resolve_team_id(key) for key in team]
 
     _require_fields(fields, "Nothing to update; pass --team, --name, --summary, or a body on stdin")
@@ -884,9 +826,16 @@ def update_issue(
     issue_id: Annotated[str, typer.Option("--id", help="Issue id or identifier, e.g. GOV-21")],
     title: Annotated[str | None, typer.Option("--title", help="New issue title")] = None,
     project: Annotated[str | None, typer.Option("--project", help="Project id to move the issue under")] = None,
-    label: Annotated[list[str] | None, typer.Option("--label", help="Replaces the label set by name or id (repeatable)")] = None,
-    add_label: Annotated[list[str] | None, typer.Option("--add-label", help="Label name or id to add to the existing set (repeatable)")] = None,
-    remove_label: Annotated[list[str] | None, typer.Option("--remove-label", help="Label name or id to remove from the existing set (repeatable)")] = None,
+    label: Annotated[
+        list[str] | None, typer.Option("--label", help="Replaces the label set by name or id (repeatable)")
+    ] = None,
+    add_label: Annotated[
+        list[str] | None, typer.Option("--add-label", help="Label name or id to add to the existing set (repeatable)")
+    ] = None,
+    remove_label: Annotated[
+        list[str] | None,
+        typer.Option("--remove-label", help="Label name or id to remove from the existing set (repeatable)"),
+    ] = None,
     state: Annotated[str | None, typer.Option("--state", help="Workflow state name to move the issue to")] = None,
     team: Annotated[
         str | None,
@@ -908,28 +857,23 @@ def update_issue(
     elif add_label is not None or remove_label is not None:
         issue = graphql("Issue", {"id": issue_id}, IssueDetailData).issue
         current_ids = {ref.id for ref in issue.labels.nodes}
-        add_ids = set(_resolve_label_ids(add_label)) if add_label else set()
-        remove_ids = set(_resolve_label_ids(remove_label)) if remove_label else set()
+        add_ids: set[str] = set(_resolve_label_ids(add_label)) if add_label else set()
+        remove_ids: set[str] = set(_resolve_label_ids(remove_label)) if remove_label else set()
         fields["labelIds"] = list(current_ids | add_ids - remove_ids)
     if team is not None:
         fields["teamId"] = _resolve_team_id(team)
     if state is not None:
         if team is None:
-            typer.echo("--state requires --team to specify which team's workflow to resolve against", err=True)
-            raise typer.Exit(1)
-        states = graphql("WorkflowStates", {"filter": _team_filter(team)}, WorkflowStatesData).workflow_states.nodes
-        matches = [candidate for candidate in states if candidate.name.casefold() == state.casefold()]
-        if len(matches) != 1:
-            available = ", ".join(sorted(candidate.name for candidate in states))
-            typer.echo(f"No unique state {state!r} in team {team!r}; available: {available}", err=True)
-            raise typer.Exit(1)
-
-        fields["stateId"] = matches[0].id
+            _fail("--state requires --team to specify which team's workflow to resolve against")
+        fields["stateId"] = _resolve_state_id(state, team)
 
     if priority is not None:
         fields["priority"] = priority
 
-    _require_fields(fields, "Nothing to update; pass --team, --title, --label, --add-label, --remove-label, --state, --priority, or a body on stdin")
+    _require_fields(
+        fields,
+        "Nothing to update; pass --team, --title, --label, --add-label, --remove-label, --state, --priority, or a body on stdin",
+    )
 
     payload = graphql("UpdateIssue", {"id": issue_id, "input": fields}, IssueUpdateData).issue_update
     issue = _require(payload.success, payload.issue, f"Failed to update issue {issue_id!r}")
@@ -953,8 +897,7 @@ def comment(
 ) -> None:
     body = _read_stdin()
     if not body.strip():
-        typer.echo("No comment body on stdin", err=True)
-        raise typer.Exit(1)
+        _fail("No comment body on stdin")
 
     payload = graphql("CreateComment", {"input": {"issueId": issue_id, "body": body}}, CommentCreateData).comment_create
     created = _require(payload.success, payload.comment, f"Failed to comment on issue {issue_id!r}")
@@ -979,6 +922,50 @@ def unarchive_issue(
     _emit({"id": issue_id, "unarchived": True})
 
 
+def _fail(message: str) -> NoReturn:
+    typer.echo(message, err=True)
+    raise typer.Exit(1)
+
+
+@cache
+def _load_config_or_die() -> ProfileConfig:
+    config = load_config()
+    if config is None:
+        _fail(f"No profile config found at {CONFIG_PATH}; create one with profiles and path_defaults.")
+    return config
+
+
+@cache
+def _resolved_profile_name() -> str:
+    return resolve_profile_name(_load_config_or_die(), _CliState.profile_override, Path.cwd())
+
+
+def graphql[T: _Model](operation: str, variables: dict[str, object], model: type[T]) -> T:
+    response = httpx.post(
+        LINEAR_ENDPOINT,
+        headers={
+            "Authorization": _load_config_or_die().root[_resolved_profile_name()].api_key,
+            "Content-Type": "application/json",
+        },
+        json={"query": _OPERATIONS, "operationName": operation, "variables": variables},
+        timeout=30.0,
+    )
+    try:
+        payload: dict[str, object] = response.json()
+    except json.JSONDecodeError:
+        _fail(f"Linear API returned a non-JSON response (HTTP {response.status_code}): {response.text[:200]}")
+
+    errors = payload.get("errors")
+    if errors:
+        _fail(f"Linear API error: {json.dumps(errors)}")
+
+    data = payload.get("data")
+    if data is None:
+        _fail(f"Linear API returned no data (HTTP {response.status_code})")
+
+    return model.model_validate(data)
+
+
 def _paginate[T: _Model, NodeT](
     operation: str,
     variables: dict[str, object],
@@ -995,24 +982,167 @@ def _paginate[T: _Model, NodeT](
         after = connection.page_info.end_cursor
 
 
-def _snapshot_nodes(issues: list[str] | None, label: str | None) -> list[IssueSnapshotNode]:
-    if issues is not None:
-        return [graphql("IssueSnapshotById", {"id": identifier}, IssueSnapshotByIdData).issue for identifier in issues]
-    if label is not None:
-        return list(
-            _paginate(
-                "IssueSnapshot", {"filter": label_snapshot_filter(label)}, IssueSnapshotData, lambda data: data.issues
-            )
-        )
-    return []
+def _require[T](success: bool, value: T | None, message: str) -> T:
+    if not success or value is None:
+        _fail(message)
+    return value
 
 
-def _snapshot_record(profile_name: str, nodes: list[IssueSnapshotNode], captured_at: str) -> dict[str, object]:
-    return {
-        "captured_at": captured_at,
-        "linear_profile": profile_name,
-        "issues": [_snapshot_issue_dict(node) for node in nodes],
+def _require_ok(success: bool, message: str) -> None:
+    if not success:
+        _fail(message)
+
+
+def _require_fields(fields: dict[str, object], message: str) -> None:
+    if not fields:
+        _fail(message)
+
+
+def _team_filter(team: str | None) -> dict[str, object]:
+    return {"team": {"key": {"eq": team}}} if team is not None else {}
+
+
+def _read_stdin() -> str:
+    return sys.stdin.read() if not sys.stdin.isatty() else ""
+
+
+def _enforce_conventions(title: str | None, body: str | None) -> None:
+    violations: list[str] = []
+    if title is not None:
+        violations.extend(validate_title(title))
+    if body is not None:
+        violations.extend(validate_body(body))
+    if not violations:
+        return
+
+    for violation in violations:
+        typer.echo(f"convention violation: {violation}", err=True)
+
+    _fail("Refusing to write: fix the title/body to match the AGENTS.md conventions.")
+
+
+def _issue_violations(
+    title: str,
+    body: str,
+    label_names: list[str],
+    group_labels: set[str] | None = None,
+    group_name: str | None = None,
+) -> list[str]:
+    violations = validate_title(title) + validate_body(body)
+    if group_labels is not None and group_name is not None:
+        violations += validate_label_presence(label_names, group_labels, group_name)
+    return violations
+
+
+def _lint_issue(
+    issue: IssueListNode,
+    group_labels: set[str] | None,
+    group_name: str | None,
+    fix_paths: bool,
+    repo_urls: dict[str, str],
+    default_repository: str | None,
+) -> tuple[str, list[str]]:
+    body = issue.description or ""
+    label_names = [label.name for label in issue.labels.nodes]
+    violations = _issue_violations(issue.title, body, label_names, group_labels, group_name)
+
+    bare_path_violations = [v for v in violations if v.startswith("bare path")]
+    if fix_paths and bare_path_violations:
+        fixed_body, fixes = fix_bare_paths(body, repo_urls, default_repository)
+        if fixes:
+            graphql("UpdateIssue", {"id": issue.id, "input": {"description": fixed_body}}, IssueUpdateData)
+            _emit({"identifier": issue.identifier, "fixed_paths": fixes})
+            body = fixed_body
+            violations = _issue_violations(issue.title, body, label_names, group_labels, group_name)
+            violations = [v for v in violations if not v.startswith("bare path")]
+
+    return body, violations
+
+
+def _orphaned_design_docs(open_bodies: list[str]) -> list[str]:
+    design_dir = next(
+        (
+            directory / "design"
+            for directory in (Path.cwd(), *Path.cwd().parents)
+            if (directory / "design/AGENTS.md").is_file()
+        ),
+        None,
+    )
+    if design_dir is None:
+        _fail("No design/AGENTS.md found in the current directory or any parent; run from inside the repo")
+    doc_names = [path.name for path in sorted(design_dir.glob("*.md")) if path.name not in ("AGENTS.md", "CLAUDE.md")]
+    return orphan_design_docs(doc_names, open_bodies)
+
+
+def _resolve_team_id(key: str) -> str:
+    teams = graphql("Teams", {}, TeamsData).teams.nodes
+    team = next((team for team in teams if team.key == key), None)
+    if team is None:
+        available = ", ".join(sorted(team.key for team in teams))
+        _fail(f"No team with key {key!r}; available keys: {available}")
+    return team.id
+
+
+def _resolve_label_group(group_name: str) -> set[str]:
+    all_labels = graphql("Labels", {}, LabelsData).issue_labels.nodes
+    names_by_id = {label.id: label.name for label in all_labels}
+    group_labels = {
+        label.name for label in all_labels if label.parent and names_by_id.get(label.parent.id) == group_name
     }
+    if not group_labels:
+        _fail(
+            f"No labels found in group {group_name!r}; available groups: "
+            f"{', '.join(sorted(label.name for label in all_labels if label.is_group))}"
+        )
+    return group_labels
+
+
+def _resolve_state_id(state: str, team: str) -> str:
+    states = graphql("WorkflowStates", {"filter": _team_filter(team)}, WorkflowStatesData).workflow_states.nodes
+    matches = [candidate for candidate in states if candidate.name.casefold() == state.casefold()]
+    if len(matches) != 1:
+        available = ", ".join(sorted(candidate.name for candidate in states))
+        _fail(f"No unique state {state!r} in team {team!r}; available: {available}")
+    return matches[0].id
+
+
+def _resolve_label_ids(labels: list[str]) -> list[str]:
+    all_labels = graphql("Labels", {}, LabelsData).issue_labels.nodes
+    name_to_id = {label.name: label.id for label in all_labels}
+    resolved: list[str] = []
+    for label in labels:
+        if label in name_to_id:
+            resolved.append(name_to_id[label])
+        elif len(label) == 36 and label.count("-") == 4:
+            resolved.append(label)
+        else:
+            available = ", ".join(sorted(name_to_id))
+            _fail(f"Unknown label {label!r}; available names: {available}")
+    return resolved
+
+
+def _ensure_label_record(labels: list[LabelNode], name: str, parent_id: str | None, is_group: bool) -> str:
+    existing = next(
+        (
+            label.id
+            for label in labels
+            if label.name == name
+            and label.is_group == is_group
+            and (label.parent.id if label.parent else None) == parent_id
+        ),
+        None,
+    )
+    if existing is not None:
+        return existing
+
+    fields: dict[str, object] = {"name": name}
+    if is_group:
+        fields["isGroup"] = True
+    if parent_id is not None:
+        fields["parentId"] = parent_id
+
+    payload = graphql("CreateLabel", {"input": fields}, IssueLabelCreateData).issue_label_create
+    return _require(payload.success, payload.issue_label, f"Failed to create label {name!r}").id
 
 
 def _snapshot_issue_dict(node: IssueSnapshotNode) -> dict[str, object]:
@@ -1028,204 +1158,42 @@ def _snapshot_issue_dict(node: IssueSnapshotNode) -> dict[str, object]:
         "priority": node.priority,
         "archived_at": node.archived_at,
         "labels": [label.name for label in node.labels.nodes],
-        "comments": [_snapshot_comment_dict(comment) for comment in node.comments.nodes],
+        "comments": [
+            {
+                "body": comment.body,
+                "user": comment.user.name if comment.user else None,
+                "created_at": comment.created_at,
+            }
+            for comment in node.comments.nodes
+        ],
     }
-
-
-def _snapshot_comment_dict(comment: IssueSnapshotCommentNode) -> dict[str, object]:
-    return {
-        "body": comment.body,
-        "user": comment.user.name if comment.user else None,
-        "created_at": comment.created_at,
-    }
-
-
-def graphql[T: _Model](operation: str, variables: dict[str, object], model: type[T]) -> T:
-    response = httpx.post(
-        LINEAR_ENDPOINT,
-        headers={"Authorization": _api_key(), "Content-Type": "application/json"},
-        json={"query": _operations(), "operationName": operation, "variables": variables},
-        timeout=30.0,
-    )
-    try:
-        payload: dict[str, object] = response.json()
-    except json.JSONDecodeError:
-        typer.echo(
-            f"Linear API returned a non-JSON response (HTTP {response.status_code}): {response.text[:200]}", err=True
-        )
-        raise typer.Exit(1) from None
-
-    errors = payload.get("errors")
-    if errors:
-        typer.echo(f"Linear API error: {json.dumps(errors)}", err=True)
-        raise typer.Exit(1)
-
-    data = payload.get("data")
-    if data is None:
-        typer.echo(f"Linear API returned no data (HTTP {response.status_code})", err=True)
-        raise typer.Exit(1)
-
-    return model.model_validate(data)
-
-
-def _enforce_conventions(title: str | None, body: str | None) -> None:
-    violations: list[str] = []
-    if title is not None:
-        violations.extend(validate_title(title))
-    if body is not None:
-        violations.extend(validate_body(body))
-    if not violations:
-        return
-
-    for violation in violations:
-        typer.echo(f"convention violation: {violation}", err=True)
-
-    typer.echo("Refusing to write: fix the title/body to match the AGENTS.md conventions.", err=True)
-    raise typer.Exit(1)
-
-
-def _resolve_team_id(key: str) -> str:
-    teams = graphql("Teams", {}, TeamsData).teams.nodes
-    for team in teams:
-        if team.key == key:
-            return team.id
-
-    available = ", ".join(sorted(team.key for team in teams))
-    typer.echo(f"No team with key {key!r}; available keys: {available}", err=True)
-    raise typer.Exit(1)
-
-
-def _resolve_label_ids(labels: list[str]) -> list[str]:
-    all_labels = graphql("Labels", {}, LabelsData).issue_labels.nodes
-    name_to_id = {label.name: label.id for label in all_labels}
-    resolved: list[str] = []
-    for label in labels:
-        if label in name_to_id:
-            resolved.append(name_to_id[label])
-        elif len(label) == 36 and label.count("-") == 4:
-            resolved.append(label)
-        else:
-            available = ", ".join(sorted(name_to_id))
-            typer.echo(f"Unknown label {label!r}; available names: {available}", err=True)
-            raise typer.Exit(1)
-    return resolved
-
-
-def _ensure_label_record(labels: list[LabelNode], name: str, parent_id: str | None, is_group: bool) -> str:
-    for label in labels:
-        label_parent_id = label.parent.id if label.parent else None
-        if label.name == name and label.is_group == is_group and label_parent_id == parent_id:
-            return label.id
-
-    fields: dict[str, object] = {"name": name}
-    if is_group:
-        fields["isGroup"] = True
-    if parent_id is not None:
-        fields["parentId"] = parent_id
-
-    payload = graphql("CreateLabel", {"input": fields}, IssueLabelCreateData).issue_label_create
-    return _require(payload.success, payload.issue_label, f"Failed to create label {name!r}").id
-
-
-def _require[T](success: bool, value: T | None, message: str) -> T:
-    if not success or value is None:
-        typer.echo(message, err=True)
-        raise typer.Exit(1)
-
-    return value
-
-
-def _require_ok(success: bool, message: str) -> None:
-    if not success:
-        typer.echo(message, err=True)
-        raise typer.Exit(1)
-
-
-def _require_fields(fields: dict[str, object], message: str) -> None:
-    if not fields:
-        typer.echo(message, err=True)
-        raise typer.Exit(1)
-
-
-def _read_stdin() -> str:
-    return sys.stdin.read() if not sys.stdin.isatty() else ""
-
-
-def _team_filter(team: str | None) -> dict[str, object]:
-    return {"team": {"key": {"eq": team}}} if team is not None else {}
-
-
-@cache
-def _operations() -> str:
-    return Path(__file__).with_name(OPERATIONS_DOCUMENT).read_text(encoding="utf-8")
-
-
-def _find_up(marker: str) -> Path:
-    for directory in (Path.cwd(), *Path.cwd().parents):
-        candidate = directory / marker
-        if candidate.is_file():
-            return candidate
-
-    raise RuntimeError(f"No {marker} found in the current directory or any parent; run from inside the repo")
 
 
 def _discover_repo_urls() -> tuple[dict[str, str], str | None]:
-    import subprocess
-
     mappings: dict[str, str] = {}
-    default_repo: str | None = None
+    default_repository: str | None = None
 
     cwd = Path.cwd()
-    for repo_dir in sorted(cwd.parent.iterdir()) if cwd.parent.exists() else []:
-        if not repo_dir.is_dir() or repo_dir.name.startswith("."):
+    for repository_directory in sorted(cwd.parent.iterdir()) if cwd.parent.exists() else []:
+        if not repository_directory.is_dir() or repository_directory.name.startswith("."):
             continue
-        result = subprocess.run(
-            ["git", "remote", "get-url", "origin"],
-            capture_output=True, text=True, cwd=repo_dir,
-        )
-        if result.returncode != 0:
+        if not bash_check("git remote get-url origin", cwd=repository_directory):
             continue
-        remote = result.stdout.strip()
+        remote = bash_output("git remote get-url origin", cwd=repository_directory).strip()
         match = re.match(r"(?:https://|git@)github\.com[/:](\S+?)(?:\.git)?$", remote)
         if not match:
             continue
         base = f"https://github.com/{match.group(1)}/blob/main"
-        mappings[repo_dir.name] = base
-        projects_dir = repo_dir / "projects"
-        if projects_dir.is_dir():
-            for project_dir in sorted(projects_dir.iterdir()):
-                if project_dir.is_dir() and not project_dir.name.startswith("."):
-                    mappings[project_dir.name] = f"{base}/projects/{project_dir.name}"
-        if cwd == repo_dir or repo_dir in cwd.parents:
-            default_repo = repo_dir.name
+        mappings[repository_directory.name] = base
+        projects_directory = repository_directory / "projects"
+        if projects_directory.is_dir():
+            for project_directory in sorted(projects_directory.iterdir()):
+                if project_directory.is_dir() and not project_directory.name.startswith("."):
+                    mappings[project_directory.name] = f"{base}/projects/{project_directory.name}"
+        if cwd == repository_directory or repository_directory in cwd.parents:
+            default_repository = repository_directory.name
 
-    return mappings, default_repo
-
-
-def _api_key() -> str:
-    return _resolved_profile().api_key
-
-
-@cache
-def _load_config_or_die() -> ProfileConfig:
-    config = load_config()
-    if config is None:
-        typer.echo(
-            f"No profile config found at {CONFIG_PATH}; create one with profiles and path_defaults.",
-            err=True,
-        )
-        raise typer.Exit(1)
-
-    return config
-
-
-@cache
-def _resolved_profile_name() -> str:
-    return resolve_profile_name(_load_config_or_die(), _CliState.profile_override, Path.cwd())
-
-
-def _resolved_profile() -> Profile:
-    return _load_config_or_die().root[_resolved_profile_name()]
+    return mappings, default_repository
 
 
 def _emit(record: dict[str, object]) -> None:

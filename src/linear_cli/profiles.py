@@ -27,14 +27,6 @@ def load_config(path: Path = CONFIG_PATH) -> ProfileConfig | None:
     return ProfileConfig.model_validate_json(path.read_text(encoding="utf-8"))
 
 
-def flatten_paths(config: ProfileConfig) -> dict[str, str]:
-    result: dict[str, str] = {}
-    for profile_name, profile in config.root.items():
-        for path in profile.paths:
-            result[path] = profile_name
-    return result
-
-
 def resolve_profile_name(
     config: ProfileConfig,
     profile_override: str | None,
@@ -58,6 +50,14 @@ def resolve_profile_name(
         raise typer.Exit(1)
 
     return path_map[max(matching, key=len)]
+
+
+def flatten_paths(config: ProfileConfig) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for profile_name, profile in config.root.items():
+        for path in profile.paths:
+            result[path] = profile_name
+    return result
 
 
 def write_config(config: ProfileConfig, path: Path = CONFIG_PATH) -> None:
