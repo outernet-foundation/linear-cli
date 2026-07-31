@@ -481,7 +481,7 @@ def archive_workflow_state(
 def snapshot(
     issue: Annotated[
         list[str] | None,
-        typer.Option("--issue", help="Issue identifier to include (repeatable), e.g. PLE-352"),
+        typer.Option("--issue", help="Issue identifier to include (repeatable), e.g. GOV-5"),
     ] = None,
     label: Annotated[
         str | None, typer.Option("--label", help="Label name; snapshot every issue carrying this label")
