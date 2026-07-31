@@ -47,6 +47,8 @@ A project's `teamIds` list gates which teams' issues it can collect. `update-iss
 
 **Direct GraphQL, not MCP and not hand-rolled `curl`.** The workspace is written to rarely and by few actors, so MCP's managed-OAuth convenience does not pay for its opacity; a direct client is portable to every context (agent, CI, by hand) and every mutation is one auditable HTTP call. Every write goes through a tool verb — do not hand-write mutations or add an MCP. When a new kind of write is needed, add a verb and its named operation.
 
+**Extend the tool, do not wrap it.** If you need a capability the CLI lacks — a new filter, an aggregation, a bulk operation — add a verb. Do not pipe CLI output through inline Python (`python3 << 'EOF'`, `python3 -c`) to compensate for a missing feature; inline wrapping produces code that vanishes when the terminal scrolls, while a verb is durable, auditable, and available to every caller. The verb pattern is one typer command function plus one named GraphQL operation.
+
 **The operations document must ship in the wheel.** `linear_operations.graphql` is loaded at runtime via `Path(__file__).with_name(...)`, so an editable install works from the source tree by accident — but a real wheel omits non-Python files unless they are named explicitly. `[tool.hatch.build.targets.wheel] include` lists both `linear_operations.graphql` and `py.typed`; drop either and the built wheel breaks every command (the `.graphql` at first API call, the marker silently for downstream type checkers). The CI wheel-build is the guard.
 
 **Tickets are declarative and durable, not plan files.** A ticket states an *outcome that is not yet true*, not a sequence of steps to reach it. This is the root convention; the rest follow from it.
