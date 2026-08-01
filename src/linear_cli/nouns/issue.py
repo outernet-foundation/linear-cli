@@ -164,10 +164,6 @@ def _node_query(fields: str) -> str:
     return f"query($id: String!) {{ issue(id: $id) {{ {fields} }} }}"
 
 
-def _label_snapshot_filter(label: str) -> dict[str, object]:
-    return {"labels": {"name": {"eq": label}}}
-
-
 def identifier_sort_key(identifier: str) -> tuple[str, int]:
     team, _, number = identifier.partition("-")
     if number.isdigit():
@@ -373,7 +369,9 @@ def issue_snapshot(
     elif label is not None:
         list_query = build_list_query("issues", ISSUE_SNAPSHOT_FIELDS, filter_type="IssueFilter", paginated=True)
         nodes = list(
-            paginate(list_query, {"filter": _label_snapshot_filter(label)}, IssueSnapshotData, lambda data: data.issues)
+            paginate(
+                list_query, {"filter": {"labels": {"name": {"eq": label}}}}, IssueSnapshotData, lambda data: data.issues
+            )
         )
     else:
         fail("Pass --issue (repeatable) or --label to select issues to snapshot.")
