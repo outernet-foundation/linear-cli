@@ -20,7 +20,7 @@ _FORBIDDEN_SECTIONS = re.compile(
     r"^[\s#*]*(Checklist|Changes\s+needed|Implementation\s+steps|Task\s+list)[\s*:.*]*$",
     re.MULTILINE | re.IGNORECASE,
 )
-_BARE_PATH = re.compile(r"(?<![\w/])[\w][\w.-]*(?:/[\w.-]+)+\.(?:md|py|yml|yaml|json|xlsx|docx|pdf)\b")
+_BARE_PATH = re.compile(r"(?<![\w/])(?<!~\/\.)[\w][\w.-]*(?:/[\w.-]+)+\.(?:md|py|yml|yaml|json|xlsx|docx|pdf)\b")
 # _BARE_PATH catches repo-relative paths in prose; _FILENAME_TLDS catches filenames masquerading as URL hostnames — different detection goals, different extension sets.
 _FILENAME_TLDS = frozenset({
     "py",
@@ -112,11 +112,10 @@ def fix_bare_paths(body: str, repo_urls: dict[str, str], default_repo: str | Non
     body_without_links = _MARKDOWN_LINK.sub("", body)
     fixes: list[str] = []
 
-    for match in _BARE_PATH.finditer(body_without_links):
-        bare_path = match.group()
+    for bare_path in dict.fromkeys(m.group() for m in _BARE_PATH.finditer(body_without_links)):
         url = _resolve_repo_path(bare_path, repo_urls, default_repo)
         if url is not None:
-            body = body.replace(bare_path, f"[{bare_path}]({url})", 1)
+            body = body.replace(bare_path, f"[{bare_path}]({url})")
             fixes.append(f"{bare_path} -> {url}")
 
     return body, fixes
