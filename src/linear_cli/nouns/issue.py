@@ -26,7 +26,7 @@ from .team import TeamNode, resolve_team_id
 from .workflow_state import WORKFLOW_STATE_FIELDS, WorkflowStatesData
 
 ISSUE_LIST_FIELDS = (
-    "id identifier title description url createdAt archivedAt "
+    "id identifier title description priority url createdAt archivedAt "
     "state { name type } labels { nodes { name } } project { id name }"
 )
 ISSUE_SNAPSHOT_FIELDS = (
@@ -35,7 +35,7 @@ ISSUE_SNAPSHOT_FIELDS = (
     "labels { nodes { name } } comments { nodes { body createdAt user { name } } }"
 )
 _DETAIL_FIELDS = (
-    "identifier title description url createdAt archivedAt "
+    "identifier title description priority url createdAt archivedAt "
     "state { name type } team { id key name } project { id name } "
     "labels { nodes { id } } attachments { nodes { id title subtitle url metadata } }"
 )
@@ -78,6 +78,7 @@ class IssueListNode(LinearModel):
     identifier: str
     title: str
     description: str | None = None
+    priority: int = 0
     url: str
     created_at: str = Field(alias="createdAt")
     archived_at: str | None = Field(default=None, alias="archivedAt")
@@ -118,6 +119,7 @@ class IssueDetailNode(LinearModel):
     identifier: str
     title: str
     description: str | None = None
+    priority: int = 0
     url: str
     created_at: str = Field(alias="createdAt")
     archived_at: str | None = Field(default=None, alias="archivedAt")
@@ -216,6 +218,7 @@ def issue_list(
             "id": issue.id,
             "identifier": issue.identifier,
             "title": issue.title,
+            "priority": issue.priority,
             "state": issue.state.name,
             "state_type": issue.state.type,
             "labels": [label.name for label in issue.labels.nodes],
@@ -235,6 +238,7 @@ def issue_get(
     emit({
         "identifier": issue.identifier,
         "title": issue.title,
+        "priority": issue.priority,
         "state": issue.state.name,
         "team": issue.team.key if issue.team else None,
         "project": issue.project.name if issue.project else None,
