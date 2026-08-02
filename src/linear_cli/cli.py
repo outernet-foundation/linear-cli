@@ -194,17 +194,28 @@ def _lint_issue(
     label_names = [label.name for label in issue.labels.nodes]
     violations = _issue_violations(issue.title, body, label_names, group_labels, group_name)
 
-    bare_path_violations = [v for v in violations if v.startswith("bare path")]
-    if fix_paths and bare_path_violations:
-        fixed_body, fixes = fix_bare_paths(body, repo_urls, default_repository)
-        if fixes:
-            mutate("issue", "Update", {"id": issue.id, "input": {"description": fixed_body}})
-            emit({"identifier": issue.identifier, "fixed_paths": fixes})
-            body = fixed_body
-            violations = _issue_violations(issue.title, body, label_names, group_labels, group_name)
-            violations = [v for v in violations if not v.startswith("bare path")]
+    if not fix_paths:
+        return body, violations
 
-    return body, violations
+    bare_path_violations = [v for v in violations if v.startswith("bare path")]
+    if not bare_path_violations:
+        return body, violations
+
+    fixed_body, fixes = fix_bare_paths(body, repo_urls, default_repository)
+    if not fixes:
+        return body, violations
+
+    fixed_violations = _issue_violations(issue.title, fixed_body, label_names, group_labels, group_name)
+    fixed_bare_path_count = sum(1 for v in fixed_violations if v.startswith("bare path"))
+    if fixed_bare_path_count >= len(bare_path_violations):
+        violations.append(
+            f"--fix-paths did not reduce bare-path violations ({len(bare_path_violations)} -> {fixed_bare_path_count}); body not written"
+        )
+        return body, violations
+
+    mutate("issue", "Update", {"id": issue.id, "input": {"description": fixed_body}})
+    emit({"identifier": issue.identifier, "fixed_paths": fixes})
+    return fixed_body, fixed_violations
 
 
 def _issue_violations(
