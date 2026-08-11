@@ -23,21 +23,24 @@ from ..models import Connection, LinearModel, NodeList
 from ..validation import validate_body, validate_title
 from .label import resolve_label_ids
 from .team import TeamNode, resolve_team_id
+from .user import resolve_user_id
 from .workflow_state import WORKFLOW_STATE_FIELDS, WorkflowStatesData
 
 ISSUE_LIST_FIELDS = (
     "id identifier title description priority url createdAt archivedAt "
-    "state { name type } labels { nodes { name } } project { id name }"
+    "state { name type } labels { nodes { name } } project { id name } assignee { name }"
 )
 ISSUE_SNAPSHOT_FIELDS = (
     "id identifier title description priority archivedAt "
     "state { name type } team { id key name } project { id name } "
-    "labels { nodes { name } } comments { nodes { body createdAt user { name } } }"
+    "labels { nodes { name } } comments { nodes { body createdAt user { name } } } "
+    "assignee { name }"
 )
 _DETAIL_FIELDS = (
     "identifier title description priority url createdAt archivedAt "
     "state { name type } team { id key name } project { id name } "
-    "labels { nodes { id } } attachments { nodes { id title subtitle url metadata } }"
+    "labels { nodes { id } } attachments { nodes { id title subtitle url metadata } } "
+    "assignee { name }"
 )
 
 issue_app = typer.Typer()
@@ -54,6 +57,10 @@ class IssueLabelName(LinearModel):
 
 class ProjectRef(LinearModel):
     id: str
+    name: str
+
+
+class AssigneeNode(LinearModel):
     name: str
 
 
@@ -85,6 +92,7 @@ class IssueListNode(LinearModel):
     state: IssueStateNode
     labels: NodeList[IssueLabelName]
     project: ProjectRef | None = None
+    assignee: AssigneeNode | None = None
 
 
 class IssuesData(LinearModel):
@@ -109,6 +117,7 @@ class IssueSnapshotNode(LinearModel):
     project: ProjectRef | None = None
     labels: NodeList[IssueLabelName]
     comments: NodeList[IssueSnapshotCommentNode]
+    assignee: AssigneeNode | None = None
 
 
 class IssueSnapshotData(LinearModel):
@@ -128,6 +137,7 @@ class IssueDetailNode(LinearModel):
     project: ProjectRef | None = None
     labels: NodeList[LabelIdRef] = Field(default_factory=lambda: NodeList(nodes=[]))
     attachments: NodeList[AttachmentNode]
+    assignee: AssigneeNode | None = None
 
 
 class IssueDetailData(LinearModel):
@@ -148,6 +158,7 @@ def snapshot_issue_dict(node: IssueSnapshotNode) -> dict[str, object]:
         "state_type": node.state.type,
         "team": node.team.key if node.team else None,
         "project": node.project.name if node.project else None,
+        "assignee": node.assignee.name if node.assignee else None,
         "priority": node.priority,
         "archived_at": node.archived_at,
         "labels": [label.name for label in node.labels.nodes],
@@ -198,6 +209,42 @@ def _resolve_state_id(state: str, team: str) -> str:
     return matches[0].id
 
 
+def _resolve_state_update(state: str | None, team: str | None) -> str | None:
+    if state is None:
+        return None
+    if team is None:
+        fail("--state requires --team to specify which team's workflow to resolve against")
+    return _resolve_state_id(state, team)
+
+
+def _apply_assignee(fields: dict[str, object], assignee: str | None, unassign: bool) -> None:
+    if unassign and assignee is not None:
+        fail("Pass --assignee or --unassign, not both.")
+    if unassign:
+        fields["assigneeId"] = None
+    elif assignee is not None:
+        fields["assigneeId"] = resolve_user_id(assignee)
+
+
+def _resolve_label_update(
+    issue_id: str,
+    label: list[str] | None,
+    add_label: list[str] | None,
+    remove_label: list[str] | None,
+) -> list[str] | None:
+    if label is not None and add_label is None and remove_label is None:
+        return resolve_label_ids(label)
+    if add_label is None and remove_label is None:
+        return None
+
+    detail_query = _node_query(_DETAIL_FIELDS)
+    current = IssueDetailData.model_validate(graphql(detail_query, {"id": issue_id})).issue
+    current_ids = {ref.id for ref in current.labels.nodes}
+    add_ids: set[str] = set(resolve_label_ids(add_label)) if add_label else set()
+    remove_ids: set[str] = set(resolve_label_ids(remove_label)) if remove_label else set()
+    return list(current_ids | add_ids - remove_ids)
+
+
 @issue_app.command(name="list")
 def issue_list(
     team: Annotated[str | None, typer.Option("--team", help="Team key to filter by, e.g. PLE")] = None,
@@ -223,6 +270,7 @@ def issue_list(
             "state_type": issue.state.type,
             "labels": [label.name for label in issue.labels.nodes],
             "project": issue.project.name if issue.project else None,
+            "assignee": issue.assignee.name if issue.assignee else None,
             "created_at": issue.created_at,
             "archived_at": issue.archived_at,
             "url": issue.url,
@@ -242,6 +290,7 @@ def issue_get(
         "state": issue.state.name,
         "team": issue.team.key if issue.team else None,
         "project": issue.project.name if issue.project else None,
+        "assignee": issue.assignee.name if issue.assignee else None,
         "created_at": issue.created_at,
         "archived_at": issue.archived_at,
         "url": issue.url,
@@ -268,6 +317,7 @@ def issue_create(
     project: Annotated[str | None, typer.Option("--project", help="Project id to file the issue under")] = None,
     label: Annotated[list[str] | None, typer.Option("--label", help="Label name or id to attach (repeatable)")] = None,
     priority: Annotated[int | None, typer.Option("--priority", help="Issue priority: 0=none, 1=urgent, 2=high")] = None,
+    assignee: Annotated[str | None, typer.Option("--assignee", help="Assignee email, name, or user id")] = None,
 ) -> None:
     description = read_stdin()
     _enforce_conventions(title, description)
@@ -280,6 +330,8 @@ def issue_create(
         fields["labelIds"] = resolve_label_ids(label)
     if priority is not None:
         fields["priority"] = priority
+    if assignee is not None:
+        fields["assigneeId"] = resolve_user_id(assignee)
 
     emit(mutate("issue", "Create", {"input": fields}))
 
@@ -308,6 +360,10 @@ def issue_update(
         typer.Option("--team", help="Team key to move the issue to (also used for state resolution), e.g. GOV"),
     ] = None,
     priority: Annotated[int | None, typer.Option("--priority", help="Issue priority: 0=none, 1=urgent, 2=high")] = None,
+    assignee: Annotated[
+        str | None, typer.Option("--assignee", help="Assignee email, name, or user id to assign")
+    ] = None,
+    unassign: Annotated[bool, typer.Option("--unassign", help="Clear the assignee")] = False,
 ) -> None:
     description = read_stdin()
     _enforce_conventions(title, description if description.strip() else None)
@@ -318,28 +374,23 @@ def issue_update(
         fields["description"] = description
     if project is not None:
         fields["projectId"] = project
-    if label is not None and add_label is None and remove_label is None:
-        fields["labelIds"] = resolve_label_ids(label)
-    elif add_label is not None or remove_label is not None:
-        detail_query = _node_query(_DETAIL_FIELDS)
-        current = IssueDetailData.model_validate(graphql(detail_query, {"id": issue_id})).issue
-        current_ids = {ref.id for ref in current.labels.nodes}
-        add_ids: set[str] = set(resolve_label_ids(add_label)) if add_label else set()
-        remove_ids: set[str] = set(resolve_label_ids(remove_label)) if remove_label else set()
-        fields["labelIds"] = list(current_ids | add_ids - remove_ids)
+    label_ids = _resolve_label_update(issue_id, label, add_label, remove_label)
+    if label_ids is not None:
+        fields["labelIds"] = label_ids
     if team is not None:
         fields["teamId"] = resolve_team_id(team)
-    if state is not None:
-        if team is None:
-            fail("--state requires --team to specify which team's workflow to resolve against")
-        fields["stateId"] = _resolve_state_id(state, team)
+    state_id = _resolve_state_update(state, team)
+    if state_id is not None:
+        fields["stateId"] = state_id
 
     if priority is not None:
         fields["priority"] = priority
+    _apply_assignee(fields, assignee, unassign)
 
     require_fields(
         fields,
-        "Nothing to update; pass --team, --title, --label, --add-label, --remove-label, --state, --priority, or a body on stdin",
+        "Nothing to update; pass --team, --title, --label, --add-label, --remove-label, --state, --priority, "
+        "--assignee, --unassign, or a body on stdin",
     )
 
     emit(mutate("issue", "Update", {"id": issue_id, "input": fields}))

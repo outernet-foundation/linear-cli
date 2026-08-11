@@ -25,6 +25,7 @@ from .nouns.label import LABEL_FIELDS, LabelsData, label_app
 from .nouns.project import PROJECT_FIELDS, ProjectsData, project_app
 from .nouns.relation import relation_app
 from .nouns.team import TEAM_FIELDS, TeamsData, team_app
+from .nouns.user import user_app
 from .nouns.workflow_state import WORKFLOW_STATE_FIELDS, WorkflowStatesData, workflow_state_app
 from .validation import fix_bare_paths, orphan_design_docs, validate_body, validate_label_presence, validate_title
 
@@ -35,6 +36,7 @@ app.add_typer(project_app, name="project")
 app.add_typer(team_app, name="team")
 app.add_typer(workflow_state_app, name="workflow-state")
 app.add_typer(label_app, name="label")
+app.add_typer(user_app, name="user")
 app.add_typer(relation_app, name="relation")
 app.add_typer(comment_app, name="comment")
 
