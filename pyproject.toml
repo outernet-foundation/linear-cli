@@ -30,6 +30,8 @@ include = [
 bashrun = { git = "https://github.com/outernet-foundation/bashrun.git", rev = "1a0add1eb9e53e19245dcdda3e2018577b4e1153" }
 
 [tool.basedpyright]
+venvPath = "."
+venv = ".venv"
 typeCheckingMode = "strict"
 include = ["src", "tests"]
 
